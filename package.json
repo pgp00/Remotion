@@ -1,0 +1,26 @@
+{
+  "name": "codex-remotion-auto-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Codex-driven product marketing video editor powered by Remotion",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @auto-video/web",
+    "studio": "npm run studio --workspace @auto-video/remotion-video",
+    "render:demo": "npm run render:demo --workspace @auto-video/remotion-video",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspace @auto-video/web",
+    "auto:edit": "node scripts/auto-edit.mjs",
+    "asset-library": "node scripts/asset-library.mjs",
+    "test:auto-edit": "node --test scripts/auto-edit.test.mjs scripts/asset-library.test.mjs scripts/lib/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

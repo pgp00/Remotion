@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+out/
+.env
+.env.local
+coverage/
+work/
+__pycache__/
+*.pyc
+*.tsbuildinfo

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "jobId": "4-27-scale",
+  "sourceRoot": "/Volumes/192.168.50.79/4.27拍摄视频",
+  "scriptPath": "examples/scripts/4-27-scale.txt",
+  "product": {
+    "sku": "BATCH-4-27-SCALE",
+    "name": "4.27拍摄批次流程测试",
+    "sellingPoints": ["素材画面展示", "不同角度展示"],
+    "aliases": [],
+    "referenceImages": []
+  },
+  "target": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "minDurationSeconds": 20,
+    "maxDurationSeconds": 40
+  }
+}

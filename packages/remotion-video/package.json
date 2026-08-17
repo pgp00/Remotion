@@ -1,0 +1,19 @@
+{
+  "name": "@auto-video/remotion-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render:demo": "remotion render src/index.ts ProductMarketingDemo ../../out/demo-product.mp4",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@auto-video/core": "*",
+    "@auto-video/shared": "*",
+    "@remotion/cli": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "remotion": "latest"
+  }
+}
