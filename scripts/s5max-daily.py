@@ -304,6 +304,19 @@ def _history_lock(workspace):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _batch_lock(batch_dir):
+    lock_path = Path(batch_dir) / ".prepare.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # ponytail: lock order is batch then workspace; no reverse acquisition path.
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _exhaustive_copy_candidates(pools, active, seed):
     hooks = _seeded(pools["hook"], seed, "all-hooks", key=lambda item: item["sentenceId"])
     ctas = _seeded(pools["cta"], seed, "all-ctas", key=lambda item: item["sentenceId"])
@@ -985,8 +998,8 @@ def _validate_catalog(batch, catalog_path):
                 raise ValueError(f"selected range exceeds catalog asset {slot['assetId']}")
 
 
-def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, catalog_path,
-                  voice_path, model_dir, index_python, target_count, batch_id, seed, device="mps"):
+def _prepare_batch_locked(*, workspace, mode, source_copy, copy_csv, materials_path, catalog_path,
+                          voice_path, model_dir, index_python, target_count, batch_id, seed, device="mps"):
     workspace = Path(workspace).resolve()
     if mode not in {"single", "batch"}:
         raise ValueError("mode must be single or batch")
@@ -1020,6 +1033,7 @@ def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, cat
             "forbidden": {key: sorted(values) for key, values in forbidden.items()},
             "provisional": provisional,
         })
+    _validate_catalog(provisional, catalog_path)
 
     unique_texts = list(dict.fromkeys(
         sentence["ttsText"] for item in provisional["items"] for sentence in item["plan"]["sentences"]
@@ -1051,6 +1065,32 @@ def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, cat
     )
     reserve_batch(workspace, manifest_path)
     return manifest_path
+
+
+def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, catalog_path,
+                  voice_path, model_dir, index_python, target_count, batch_id, seed, device="mps"):
+    workspace = Path(workspace).resolve()
+    if mode not in {"single", "batch"}:
+        raise ValueError("mode must be single or batch")
+    if (mode == "single") != (target_count == 1):
+        raise ValueError("single mode requires target_count 1")
+    if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id):
+        raise ValueError("batch_id must be filename-safe")
+    batch_dir = workspace / "work/production-batches" / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    with _batch_lock(batch_dir):
+        manifest_path = batch_dir / "manifest.json"
+        if manifest_path.exists():
+            status = json.loads(manifest_path.read_text(encoding="utf-8")).get("batchStatus")
+            if status:
+                raise ValueError(f"batch {batch_id} is already in state {status}")
+            raise ValueError(f"batch is already prepared: {batch_id}")
+        return _prepare_batch_locked(
+            workspace=workspace, mode=mode, source_copy=source_copy, copy_csv=copy_csv,
+            materials_path=materials_path, catalog_path=catalog_path, voice_path=voice_path,
+            model_dir=model_dir, index_python=index_python, target_count=target_count,
+            batch_id=batch_id, seed=seed, device=device,
+        )
 
 
 def render_batch(*, manifest_path, workspace, model_dir, index_python, out_dir, jobs=1, limit=None, item_id=None, device="mps"):

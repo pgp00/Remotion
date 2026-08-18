@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import threading
 import tempfile
 import unittest
 import wave
@@ -156,6 +157,108 @@ class DailyPlanTest(unittest.TestCase):
         self.assertEqual(manifest["batchStatus"], "sealed")
         self.assertTrue(all(slot["sourceOutSeconds"] - slot["sourceInSeconds"] >= 5.5
                             for item in manifest["items"] for slot in item["visualSlots"]))
+
+    def test_prepare_checks_catalog_before_starting_tts(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"assets": []}), encoding="utf-8")
+            source = root / "source-copy.txt"
+            source.write_text("测试原始文案。", encoding="utf-8")
+            voice = root / "voice.wav"
+            write_wav(voice)
+            model = root / "model"
+            model.mkdir()
+            (model / "config.yaml").write_text("model: test\n", encoding="utf-8")
+            calls = []
+
+            with patch.object(module.subprocess, "run", side_effect=lambda *args, **kwargs: calls.append(args)):
+                with self.assertRaisesRegex(ValueError, "catalog is missing"):
+                    module.prepare_batch(
+                        workspace=root, mode="single", source_copy=source, copy_csv=csv_path,
+                        materials_path=assets_path, catalog_path=catalog, voice_path=voice,
+                        model_dir=model, index_python=root / "python", target_count=1,
+                        batch_id="catalog-before-tts", seed="catalog-seed", device="cpu",
+                    )
+
+        self.assertEqual(calls, [])
+
+    def test_prepare_serializes_same_batch_and_preserves_sealed_manifest(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            materials = json.loads(assets_path.read_text(encoding="utf-8"))
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"assets": [
+                {"id": clip["assetId"], "durationInSeconds": clip["sourceOutSeconds"]}
+                for clip in materials["selection"]["clipLibrary"]
+            ]}), encoding="utf-8")
+            source = root / "source-copy.txt"
+            source.write_text("测试原始文案。", encoding="utf-8")
+            voice = root / "voice.wav"
+            write_wav(voice)
+            model = root / "model"
+            model.mkdir()
+            (model / "config.yaml").write_text("model: test\n", encoding="utf-8")
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release_first = threading.Event()
+            calls = []
+            errors = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                if len(calls) == 1:
+                    first_entered.set()
+                    release_first.wait(2)
+                else:
+                    second_entered.set()
+                manifest_path = Path(command[command.index("--manifest") + 1])
+                batch_file = Path(command[command.index("--batch-file") + 1])
+                items = []
+                for line, task in enumerate(map(json.loads, batch_file.read_text(encoding="utf-8").splitlines()), 1):
+                    wav_path = root / "work/indextts25/cache" / f"sentence-{line}.wav"
+                    write_wav(wav_path, seconds=1.0)
+                    items.append({"line": line, "text": task["text"], "outputPath": str(wav_path),
+                                  "durationFactor": 1, "contentKey": f"{line:064x}",
+                                  "sha256": module._sha_file(wav_path)})
+                manifest_path.write_text(json.dumps({
+                    "engine": "IndexTTS-2.5", "engineVersion": "v2.5.0",
+                    "voiceSha256": module._sha_file(voice),
+                    "modelConfigSha256": module._sha_file(model / "config.yaml"),
+                    "items": items,
+                }), encoding="utf-8")
+
+            def prepare():
+                try:
+                    module.prepare_batch(
+                        workspace=root, mode="single", source_copy=source, copy_csv=csv_path,
+                        materials_path=assets_path, catalog_path=catalog, voice_path=voice,
+                        model_dir=model, index_python=root / "python", target_count=1,
+                        batch_id="same-batch", seed="same-seed", device="cpu",
+                    )
+                except Exception as error:
+                    errors.append(error)
+
+            with patch.object(module.subprocess, "run", side_effect=fake_run):
+                first = threading.Thread(target=prepare)
+                first.start()
+                self.assertTrue(first_entered.wait(2))
+                second = threading.Thread(target=prepare)
+                second.start()
+                try:
+                    self.assertFalse(second_entered.wait(0.2))
+                finally:
+                    release_first.set()
+                first.join(3)
+                second.join(3)
+
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(any("sealed" in str(error) for error in errors))
 
     def test_rejects_bad_copy_pool_before_planning(self):
         module = load_module()
