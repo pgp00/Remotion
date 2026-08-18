@@ -31,6 +31,7 @@ TEMPLATES = (
     ("appearance", "scene", "blade", "power", "shave", "water", "charge"),
 )
 LIVE_BATCH_STATES = {"sealed", "sample_pending", "sample_approved", "rendering"}
+ARCHIVABLE_BATCH_STATES = {"audio_ready", *LIVE_BATCH_STATES}
 
 
 def _sha(value):
@@ -734,10 +735,20 @@ def reserve_batch(workspace, manifest_path):
     manifest_path = _inside(workspace, manifest_path, "manifest")
     with _history_lock(workspace):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        status = manifest.get("batchStatus")
+        if status == "complete":
+            raise ValueError("completed batches cannot be reserved")
+        if status != "audio_ready":
+            raise ValueError(f"cannot reserve batch in state {status!r}; expected audio_ready")
         history = history_signatures(workspace, excluding=manifest_path)
+        seen = {key: set() for key in ("copy", "text", "visual")}
         for item in manifest["items"]:
             for key in ("copy", "text", "visual"):
-                if item[f"{key}Signature"] in history[key]:
+                signature = item[f"{key}Signature"]
+                if signature in seen[key]:
+                    raise ValueError(f"manifest duplicate for {key}: {item['id']}")
+                seen[key].add(signature)
+                if signature in history[key]:
                     raise ValueError(f"history conflict for {key}: {item['id']}")
         manifest["batchStatus"] = "sealed"
         manifest["sealedAt"] = datetime.now().astimezone().isoformat()
@@ -751,8 +762,11 @@ def archive_batch(workspace, manifest_path, reason):
     manifest_path = _inside(workspace, manifest_path, "manifest")
     with _history_lock(workspace):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("batchStatus") == "complete":
+        status = manifest.get("batchStatus")
+        if status == "complete":
             raise ValueError("completed batches cannot be archived")
+        if status not in ARCHIVABLE_BATCH_STATES:
+            raise ValueError(f"cannot archive batch in state {status!r}")
         manifest["batchStatus"] = "archived"
         manifest["archivedAt"] = datetime.now().astimezone().isoformat()
         manifest["archiveReason"] = reason.strip()

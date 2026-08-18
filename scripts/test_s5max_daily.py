@@ -209,6 +209,61 @@ class DailyPlanTest(unittest.TestCase):
                 module.reserve_batch(root, paths[1])
             self.assertEqual(json.loads(paths[0].read_text(encoding="utf-8"))["batchStatus"], "sealed")
 
+    def test_reserve_rejects_duplicate_signatures_within_candidate_manifest(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "work/production-batches/duplicate/manifest.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({
+                "schemaVersion": 2, "batchStatus": "audio_ready",
+                "items": [
+                    {"id": "duplicate-001", "copySignature": "same-copy", "textSignature": "same-text", "visualSignature": "same-visual"},
+                    {"id": "duplicate-002", "copySignature": "same-copy", "textSignature": "same-text", "visualSignature": "same-visual"},
+                ],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "manifest duplicate"):
+                module.reserve_batch(root, path)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["batchStatus"], "audio_ready")
+
+    def test_reserve_and_archive_enforce_batch_state_transitions(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "work/production-batches/states/manifest.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({
+                "schemaVersion": 2, "batchStatus": "audio_ready",
+                "items": [{"id": "states-001", "copySignature": "copy", "textSignature": "text", "visualSignature": "visual"}],
+            }), encoding="utf-8")
+
+            sealed = module.reserve_batch(root, path)
+            sealed_at = sealed["sealedAt"]
+            with self.assertRaisesRegex(ValueError, "sealed"):
+                module.reserve_batch(root, path)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sealedAt"], sealed_at)
+
+            module.archive_batch(root, path, "rejected")
+            with self.assertRaisesRegex(ValueError, "archived"):
+                module.reserve_batch(root, path)
+
+            complete = root / "work/production-batches/complete-state/manifest.json"
+            complete.parent.mkdir(parents=True)
+            complete.write_text(json.dumps({
+                "schemaVersion": 2, "batchStatus": "complete", "sealedAt": "fixed", "items": [],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "completed"):
+                module.reserve_batch(root, complete)
+            with self.assertRaisesRegex(ValueError, "completed"):
+                module.archive_batch(root, complete, "too late")
+
+            invalid = root / "work/production-batches/invalid/manifest.json"
+            invalid.parent.mkdir(parents=True)
+            invalid.write_text(json.dumps({"schemaVersion": 2, "batchStatus": "draft", "items": []}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "draft"):
+                module.archive_batch(root, invalid, "not ready")
+
     def test_visual_signature_uses_ordered_meaningful_clip_ids_only(self):
         module = load_module()
         first = [{"clipId": "face-shave", "sourceInSeconds": 0.0},
