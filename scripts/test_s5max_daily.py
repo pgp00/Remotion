@@ -292,6 +292,60 @@ class DailyPlanTest(unittest.TestCase):
         self.assertEqual(len(batch["items"]), 3)
         self.assertEqual([item["visualSlots"][0]["assetId"] for item in batch["items"]], ["y", "x", "z"])
 
+    def test_joint_fallback_expands_prior_group_after_later_conflict(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            seed = "cross-group"
+
+            def sentence(label, category):
+                return {"sentenceId": f"{label}-{category}", "sourceText": f"{label}-{category}",
+                        "normalizedText": f"{label}-{category}。"}
+
+            candidates = [
+                (tuple(module.SELLING[:2]), tuple([sentence("A1", "hook"),
+                                                   *(sentence("A1", category) for category in module.SELLING[:2]),
+                                                   sentence("A1", "cta")])),
+                (tuple(module.SELLING[:2]), tuple([sentence("A2", "hook"),
+                                                   *(sentence("A2", category) for category in module.SELLING[:2]),
+                                                   sentence("A2", "cta")])),
+                (tuple(module.SELLING[:3]), tuple([sentence("B", "hook"),
+                                                   *(sentence("B", category) for category in module.SELLING[:3]),
+                                                   sentence("B", "cta")])),
+            ]
+            clips = {
+                asset_id: {"assetId": asset_id, "quickFingerprint": f"fp-{asset_id}",
+                           "sourceInSeconds": 0, "sourceOutSeconds": 8}
+                for asset_id in ("x", "y")
+            }
+
+            def copy_candidates(_pools, _active, _seed):
+                yield from candidates
+
+            def visual_candidates(item, _visual_pools, _seed, _audio_durations):
+                label = item["sourceSentenceIds"][0].split("-", 1)[0]
+                asset_id = {"A1": "x", "A2": "y", "B": "x"}[label]
+                yield tuple(clips[asset_id] for _ in item["categories"])
+
+            def visual_signature(candidate):
+                return candidate[0]["assetId"]
+
+            with patch.object(module, "FAST_ATTEMPTS", 0), \
+                    patch.object(module, "_selling_counts", return_value=[2, 3]), \
+                    patch.object(module, "_iter_exhaustive_copy_candidates", side_effect=copy_candidates), \
+                    patch.object(module, "_exhaustive_visual_candidates", side_effect=visual_candidates), \
+                    patch.object(module, "_material_missing", return_value=[]), \
+                    patch.object(module, "_visual_signature", side_effect=visual_signature, create=True):
+                batch = module.plan_batch(
+                    batch_id="cross", seed=seed, copy_csv=csv_path, materials_path=assets_path,
+                    catalog_path="catalog.json", voice_path="voice.wav", count=2,
+                    forbidden={"copy": set(), "text": set(), "visual": set()},
+                )
+
+        self.assertEqual([item["sellingPointCount"] for item in batch["items"]], [2, 3])
+        self.assertEqual([item["visualSlots"][0]["assetId"] for item in batch["items"]], ["y", "x"])
+
     def test_scripts_json_persists_source_sentences(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:

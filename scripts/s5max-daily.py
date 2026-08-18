@@ -192,6 +192,13 @@ def _clip_id(clip):
     return clip.get("clipId", clip.get("assetId"))
 
 
+def _visual_signature(selected):
+    return _sha(_canonical([
+        (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
+        for clip in selected
+    ]))
+
+
 def _exhaustive_copy_candidates(pools, active, seed):
     hooks = _seeded(pools["hook"], seed, "all-hooks", key=lambda item: item["sentenceId"])
     ctas = _seeded(pools["cta"], seed, "all-ctas", key=lambda item: item["sentenceId"])
@@ -302,60 +309,92 @@ def _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage
 def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, catalog_path, voice_path,
                          count, forbidden, audio_durations, active, selling_counts):
     missing = [{"kind": "copy", "message": "add more hook, CTA, or selling sentences"}]
+    groups = Counter(selling_counts)
+    ordered_groups = sorted(groups)
     narratives = {}
     narrative_edges = {}
-    edge_sources = {}
-    edge_seen = {}
-    match_left, match_right = {}, {}
-    groups = Counter(selling_counts)
+    visual_sources = {}
+    visual_seen = {}
+    visual_exhausted = {}
     group_nodes = {selling_count: [] for selling_count in groups}
-    group_matches = Counter()
+    copy_sources = {selling_count: _iter_exhaustive_copy_candidates(pools, active, seed)
+                    for selling_count in ordered_groups}
+    copy_exhausted = {selling_count: False for selling_count in ordered_groups}
     seen_narratives = set()
     next_node = 0
 
-    def edges(node):
-        cached = narrative_edges[node]
-        for value in cached:
-            yield value
-        source = edge_sources[node]
-        seen = edge_seen[node]
+    source_node, sink_node = ("source",), ("sink",)
+    graph = defaultdict(list)
+
+    def add_edge(start, end, capacity):
+        forward = [end, len(graph[end]), capacity]
+        reverse = [start, len(graph[start]), 0]
+        graph[start].append(forward)
+        graph[end].append(reverse)
+        return forward
+
+    group_edges = {
+        selling_count: add_edge(source_node, ("group", selling_count), groups[selling_count])
+        for selling_count in ordered_groups
+    }
+    visual_sink_edges = {}
+
+    def ensure_visual(visual_signature):
+        if visual_signature not in visual_sink_edges:
+            visual_node = ("visual", visual_signature)
+            visual_sink_edges[visual_signature] = add_edge(visual_node, sink_node, 1)
+
+    def add_visual_edge(node):
+        source = visual_sources[node]
+        seen = visual_seen[node]
         while True:
             try:
                 visual_candidate = next(source)
             except StopIteration:
-                return
-            visual_signature = _sha(_canonical([
-                (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
-                for clip in visual_candidate
-            ]))
+                visual_exhausted[node] = True
+                return None
+            visual_signature = _visual_signature(visual_candidate)
             if visual_signature in seen or visual_signature in forbidden["visual"]:
                 continue
             seen.add(visual_signature)
-            value = visual_signature, visual_candidate
-            cached.append(value)
-            yield value
+            ensure_visual(visual_signature)
+            edge = add_edge(("narrative", node), ("visual", visual_signature), 1)
+            narrative_edges[node].append((visual_signature, visual_candidate, edge))
+            return edge
 
     def augment(node, visited):
-        for visual_signature, _ in edges(node):
-            if visual_signature in visited:
+        if node == sink_node:
+            return True
+        if node in visited:
+            return False
+        visited.add(node)
+        for edge in graph[node]:
+            if edge[2] <= 0 or edge[0] in visited:
                 continue
-            visited.add(visual_signature)
-            owner = match_right.get(visual_signature)
-            if owner is None or augment(owner, visited):
-                match_right[visual_signature] = node
-                match_left[node] = visual_signature
+            if augment(edge[0], visited):
+                edge[2] -= 1
+                graph[edge[0]][edge[1]][2] += 1
                 return True
+        if node[0] == "narrative" and not visual_exhausted[node[1]]:
+            while True:
+                edge = add_visual_edge(node[1])
+                if edge is None:
+                    break
+                if edge[0] not in visited and augment(edge[0], visited):
+                    edge[2] -= 1
+                    graph[edge[0]][edge[1]][2] += 1
+                    return True
         return False
 
-    # ponytail: matching runs only after fast path and caches visited edges; replace if measured scans bottleneck.
-    for selling_count in sorted(groups):
-        source = _iter_exhaustive_copy_candidates(pools, active, seed)
-        target = groups[selling_count]
-        while group_matches[selling_count] < target:
+    def add_narrative(selling_count):
+        nonlocal next_node, missing
+        source = copy_sources[selling_count]
+        while not copy_exhausted[selling_count]:
             try:
                 categories, candidate = next(source)
             except StopIteration:
-                break
+                copy_exhausted[selling_count] = True
+                return False
             if len(categories) != selling_count:
                 continue
             item = _copy_item(index=0, batch_id=batch_id, selling_count=selling_count,
@@ -372,30 +411,47 @@ def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, cat
             node = next_node
             next_node += 1
             narratives[node] = item
+            add_edge(("group", selling_count), ("narrative", node), 1)
             narrative_edges[node] = []
-            edge_sources[node] = _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations)
-            edge_seen[node] = set()
+            visual_sources[node] = _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations)
+            visual_seen[node] = set()
+            visual_exhausted[node] = False
             group_nodes[selling_count].append(node)
-            if augment(node, set()):
-                group_matches[selling_count] += 1
-            else:
-                missing = [{"kind": "material", "message": "add more category clips"}]
-        if group_matches[selling_count] < target:
-            exact = sum(group_matches.values())
-            raise CapacityError(exact, missing)
+            return True
+        return False
+
+    # ponytail: matching runs only after fast path; augmenting paths cache only visited visual edges.
+    # The lazy source expansion pauses satisfied groups and resumes them only for later conflicts.
+    for group_index, selling_count in enumerate(ordered_groups):
+        target = groups[selling_count]
+        while groups[selling_count] - group_edges[selling_count][2] < target:
+            if add_narrative(selling_count):
+                augment(source_node, set())
+                continue
+            expanded = False
+            for prior_group in ordered_groups[:group_index]:
+                if add_narrative(prior_group):
+                    expanded = True
+                    augment(source_node, set())
+                    if groups[selling_count] - group_edges[selling_count][2] >= target:
+                        break
+            if groups[selling_count] - group_edges[selling_count][2] >= target:
+                break
+            if not expanded:
+                exact = sum(groups[value] - group_edges[value][2] for value in ordered_groups)
+                raise CapacityError(exact, missing)
 
     items = []
     sentence_usage, asset_usage = Counter(), Counter()
     queues = {
-        selling_count: [node for node in nodes if node in match_left]
+        selling_count: [node for node in nodes
+                        if any(edge[2] == 0 for _, _, edge in narrative_edges[node])]
         for selling_count, nodes in group_nodes.items()
     }
     for index, selling_count in enumerate(selling_counts):
         node = queues[selling_count].pop(0)
         item = narratives[node]
-        visual_signature = match_left[node]
-        visual_candidate = next(candidate for signature, candidate in narrative_edges[node]
-                                if signature == visual_signature)
+        visual_signature, visual_candidate, _ = next(edge for edge in narrative_edges[node] if edge[2][2] == 0)
         item["id"] = f"{PRODUCT_SKU}-{batch_id}-{index + 1:03d}"
         item["title"] = f"S5Max {batch_id} 每日组合 {index + 1:03d}"
         _attach_visual(item, visual_candidate, visual_signature, catalog_path, voice_path)
@@ -541,8 +597,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                 used_fingerprints.add(clip["quickFingerprint"])
             if not complete:
                 continue
-            visual_signature = _sha(_canonical([(_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
-                                                for clip in selected]))
+            visual_signature = _visual_signature(selected)
             if visual_signature not in visual_signatures and visual_signature not in forbidden["visual"]:
                 break
         else:
@@ -551,9 +606,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
             for candidate in _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations):
                 if previous_hook and len(visual_pools[item["categories"][0]]) > 1 and _clip_id(candidate[0]) == previous_hook:
                     continue
-                candidate_signature = _sha(_canonical([
-                    (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"]) for clip in candidate
-                ]))
+                candidate_signature = _visual_signature(candidate)
                 if candidate_signature not in visual_signatures and candidate_signature not in forbidden["visual"]:
                     selected, visual_signature = candidate, candidate_signature
                     break
