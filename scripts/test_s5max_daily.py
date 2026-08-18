@@ -34,7 +34,8 @@ def fixture(root: Path):
     def add(category, stem, count, word=""):
         for index in range(count):
             clips.append({
-                "assetId": f"{stem}-{index}", "category": category, "label": category,
+                "assetId": f"{stem}-{index}", "clipId": f"{stem}-clip-{index}",
+                "category": category, "label": category,
                 "sourcePath": f"/source/{word}{stem}-{index}.mp4", "sourceInSeconds": 0,
                 "sourceOutSeconds": 8, "quickFingerprint": f"fp-{stem}-{index}",
             })
@@ -149,6 +150,100 @@ class DailyPlanTest(unittest.TestCase):
             next_batch = module.plan_batch(**{**common, "batch_id": "text-b"}, forbidden=blocked)
 
         self.assertNotEqual(first["items"][0]["textSignature"], next_batch["items"][0]["textSignature"])
+
+    def test_history_reads_legacy_outputs_and_reserves_only_live_batches(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "work/production/legacy/manifest.json"
+            legacy.parent.mkdir(parents=True)
+            output = root / "out/legacy.mp4"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"verified-video")
+            legacy.write_text(json.dumps({
+                "sentences": [
+                    {"text": "旧文案。", "shot": {"sourceId": "asset-old"}},
+                    {"text": "旧收尾。", "shot": {"sourceId": "asset-cta"}},
+                ],
+                "output": {"path": str(output)},
+            }, ensure_ascii=False), encoding="utf-8")
+            live = root / "work/production-batches/live/manifest.json"
+            live.parent.mkdir(parents=True)
+            live.write_text(json.dumps({
+                "schemaVersion": 2,
+                "batchStatus": "sealed",
+                "items": [{"id": "live-001", "copySignature": "copy-live", "textSignature": "text-live", "visualSignature": "visual-live"}],
+            }), encoding="utf-8")
+            archived = root / "work/production-batches/old/manifest.json"
+            archived.parent.mkdir(parents=True)
+            archived.write_text(json.dumps({
+                "schemaVersion": 2,
+                "batchStatus": "archived",
+                "items": [{"id": "old-001", "copySignature": "ignored", "textSignature": "ignored", "visualSignature": "ignored"}],
+            }), encoding="utf-8")
+
+            history = module.history_signatures(root)
+
+        self.assertIn("text-live", history["text"])
+        self.assertIn("visual-live", history["visual"])
+        self.assertNotIn("ignored", history["copy"])
+        self.assertIn(module._text_signature(["旧文案。", "旧收尾。"]), history["text"])
+        self.assertIn(module._sha("asset-old\0asset-cta"), history["visual"])
+
+    def test_second_batch_cannot_reserve_the_same_signatures(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for name in ("first", "second"):
+                path = root / f"work/production-batches/{name}/manifest.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({
+                    "schemaVersion": 2, "batchStatus": "audio_ready",
+                    "items": [{"id": f"{name}-001", "copySignature": "same-copy",
+                               "textSignature": "same-text", "visualSignature": "same-visual"}],
+                }), encoding="utf-8")
+                paths.append(path)
+            module.reserve_batch(root, paths[0])
+            with self.assertRaisesRegex(ValueError, "history conflict"):
+                module.reserve_batch(root, paths[1])
+            self.assertEqual(json.loads(paths[0].read_text(encoding="utf-8"))["batchStatus"], "sealed")
+
+    def test_visual_signature_uses_ordered_meaningful_clip_ids_only(self):
+        module = load_module()
+        first = [{"clipId": "face-shave", "sourceInSeconds": 0.0},
+                 {"clipId": "blade-closeup", "sourceInSeconds": 0.0}]
+        trim_changed = [{"clipId": "face-shave", "sourceInSeconds": 0.2},
+                        {"clipId": "blade-closeup", "sourceInSeconds": 0.4}]
+        self.assertEqual(module._visual_signature([clip["clipId"] for clip in first]),
+                         module._visual_signature([clip["clipId"] for clip in trim_changed]))
+        self.assertNotEqual(module._visual_signature(["face-shave", "blade-closeup"]),
+                            module._visual_signature(["blade-closeup", "face-shave"]))
+
+    def test_archive_batch_releases_reservation_and_rejects_completed_batch(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archived = root / "work/production-batches/archived/manifest.json"
+            archived.parent.mkdir(parents=True)
+            archived.write_text(json.dumps({
+                "schemaVersion": 2, "batchStatus": "sealed",
+                "items": [{"id": "archived-001", "copySignature": "copy", "textSignature": "text",
+                           "visualSignature": "visual"}],
+            }), encoding="utf-8")
+            result = module.archive_batch(root, archived, "sample rejected")
+
+            self.assertEqual(result["batchStatus"], "archived")
+            self.assertEqual(result["archiveReason"], "sample rejected")
+            self.assertNotIn("copy", module.history_signatures(root)["copy"])
+            with self.assertRaisesRegex(ValueError, "non-empty"):
+                module.archive_batch(root, archived, "  ")
+
+            complete = root / "work/production-batches/complete/manifest.json"
+            complete.parent.mkdir(parents=True)
+            complete.write_text(json.dumps({"schemaVersion": 2, "batchStatus": "complete", "items": []}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "completed"):
+                module.archive_batch(root, complete, "too late")
 
     def test_exhaustive_fallback_has_no_fixed_attempt_ceiling(self):
         module = load_module()
@@ -329,7 +424,7 @@ class DailyPlanTest(unittest.TestCase):
                 yield tuple(clips[asset_id] for _ in item["categories"])
 
             def visual_signature(candidate):
-                return candidate[0]["assetId"]
+                return candidate[0] if isinstance(candidate[0], str) else candidate[0]["assetId"]
 
             with patch.object(module, "FAST_ATTEMPTS", 0), \
                     patch.object(module, "_selling_counts", return_value=[2, 3]), \

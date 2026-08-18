@@ -3,6 +3,8 @@
 
 import argparse
 import csv
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import itertools
 import json
@@ -28,6 +30,7 @@ TEMPLATES = (
     ("shave", "blade", "power", "water", "charge", "appearance", "scene"),
     ("appearance", "scene", "blade", "power", "shave", "water", "charge"),
 )
+LIVE_BATCH_STATES = {"sealed", "sample_pending", "sample_approved", "rendering"}
 
 
 def _sha(value):
@@ -88,16 +91,24 @@ def load_visual_pools(path):
     if not isinstance(clips, list) or not clips:
         raise ValueError("materials selection.clipLibrary must be a non-empty list")
     by_category = defaultdict(list)
-    seen = set()
-    for clip in clips:
+    seen_assets, seen_clips = set(), set()
+    for value in clips:
+        clip = dict(value)
         asset_id = clip.get("assetId")
+        clip_id = clip.get("clipId") or asset_id
         fingerprint = clip.get("quickFingerprint")
-        if not asset_id or asset_id in seen or not fingerprint:
+        if not asset_id or asset_id in seen_assets or not fingerprint:
             raise ValueError("material clips need unique assetId values and quickFingerprint")
+        if not isinstance(clip_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", clip_id):
+            raise ValueError(f"material clipId must be filename-safe: {clip_id}")
+        if clip_id in seen_clips:
+            raise ValueError("material clips need unique clipId values")
         start, end = clip.get("sourceInSeconds"), clip.get("sourceOutSeconds")
         if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or start < 0 or end <= start:
             raise ValueError(f"invalid source range for material {asset_id}")
-        seen.add(asset_id)
+        clip = {**clip, "clipId": clip_id}
+        seen_assets.add(asset_id)
+        seen_clips.add(clip_id)
         by_category[clip.get("category")].append(clip)
 
     def matching(categories, words):
@@ -105,7 +116,7 @@ def load_visual_pools(path):
                 if any(word in f"{clip.get('sourcePath', '')} {clip.get('label', '')}" for word in words)]
 
     def unique(items):
-        return list({item["assetId"]: item for item in items}.values())
+        return list({item["clipId"]: item for item in items}.values())
 
     power = by_category["power"]
     blade = matching(("power",), ("刀头", "刀网", "按压", "贴合")) or power
@@ -193,10 +204,87 @@ def _clip_id(clip):
 
 
 def _visual_signature(selected):
-    return _sha(_canonical([
-        (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
-        for clip in selected
-    ]))
+    return _sha("\0".join(selected))
+
+
+def _text_signature(texts):
+    connectors = ("同时", "而且", "另外", "然后", "并且")
+    normalized = []
+    for text in texts:
+        text = unicodedata.normalize("NFKC", text).strip()
+        if text.startswith(connectors):
+            text = text[2:]
+        normalized.append("".join(character for character in text
+                                  if not character.isspace() and not unicodedata.category(character).startswith("P")))
+    return _sha("\0".join(normalized))
+
+
+def _history_manifest_paths(workspace):
+    root = Path(workspace)
+    return sorted({
+        *root.glob("work/production-batches/*/manifest.json"),
+        *root.glob("work/s5max-daily/*/manifest.json"),
+        *root.glob("work/production/*/manifest.json"),
+    })
+
+
+def history_signatures(workspace, excluding=None):
+    root = Path(workspace)
+    signatures = {"copy": set(), "text": set(), "visual": set()}
+    excluded = Path(excluding).resolve() if excluding else None
+    paths = _history_manifest_paths(root)
+    batch_values = {}
+    owned_video_ids = set()
+    for manifest_path in paths:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if value.get("schemaVersion") == 2 and "batchStatus" in value:
+            batch_values[manifest_path] = value
+            owned_video_ids.update(item.get("id") for item in value.get("items", []) if item.get("id"))
+    for manifest_path in paths:
+        if excluded and manifest_path.resolve() == excluded:
+            continue
+        value = batch_values.get(manifest_path)
+        if value is not None:
+            if value.get("batchStatus") == "archived":
+                continue
+            if value.get("batchStatus") not in LIVE_BATCH_STATES | {"complete"}:
+                continue
+            for item in value.get("items", []):
+                for key in signatures:
+                    if item.get(f"{key}Signature"):
+                        signatures[key].add(item[f"{key}Signature"])
+            continue
+        if manifest_path.parent.name in owned_video_ids:
+            continue
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if "items" in value:
+            for item in value["items"]:
+                if item.get("status") == "verified":
+                    for key in signatures:
+                        if item.get(f"{key}Signature"):
+                            signatures[key].add(item[f"{key}Signature"])
+            continue
+        output = value.get("output") or {}
+        output_path = output.get("path") or value.get("outputPath")
+        if output_path and not Path(output_path).is_absolute():
+            output_path = root / output_path
+        if output_path and Path(output_path).is_file() and value.get("sentences"):
+            signatures["text"].add(_text_signature([item["text"] for item in value["sentences"]]))
+            signatures["visual"].add(_visual_signature([item["shot"]["sourceId"] for item in value["sentences"]]))
+    return signatures
+
+
+@contextmanager
+def _history_lock(workspace):
+    lock_path = Path(workspace) / "work/production-batches/.history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # ponytail: one workspace-wide lock; shard per batch only if contention matters.
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _exhaustive_copy_candidates(pools, active, seed):
@@ -278,7 +366,8 @@ def _material_missing(item, visual_pools, audio_durations):
 
 def _attach_visual(item, selected, visual_signature, catalog_path, voice_path):
     slots = [{
-        "category": category, "assetId": clip["assetId"], "quickFingerprint": clip["quickFingerprint"],
+        "category": category, "assetId": clip["assetId"], "clipId": _clip_id(clip),
+        "quickFingerprint": clip["quickFingerprint"],
         "sourceInSeconds": clip["sourceInSeconds"], "sourceOutSeconds": clip["sourceOutSeconds"],
     } for category, clip in zip(item["categories"], selected)]
     item["visualSlots"] = slots
@@ -353,7 +442,7 @@ def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, cat
             except StopIteration:
                 visual_exhausted[node] = True
                 return None
-            visual_signature = _visual_signature(visual_candidate)
+            visual_signature = _visual_signature([_clip_id(clip) for clip in visual_candidate])
             if visual_signature in seen or visual_signature in forbidden["visual"]:
                 continue
             seen.add(visual_signature)
@@ -456,7 +545,7 @@ def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, cat
         item["title"] = f"S5Max {batch_id} 每日组合 {index + 1:03d}"
         _attach_visual(item, visual_candidate, visual_signature, catalog_path, voice_path)
         sentence_usage.update(item["sourceSentenceIds"])
-        asset_usage.update(clip["assetId"] for clip in visual_candidate)
+        asset_usage.update(_clip_id(clip) for clip in visual_candidate)
         items.append(item)
     return _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage, items)
 
@@ -597,7 +686,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                 used_fingerprints.add(clip["quickFingerprint"])
             if not complete:
                 continue
-            visual_signature = _visual_signature(selected)
+            visual_signature = _visual_signature([_clip_id(clip) for clip in selected])
             if visual_signature not in visual_signatures and visual_signature not in forbidden["visual"]:
                 break
         else:
@@ -606,7 +695,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
             for candidate in _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations):
                 if previous_hook and len(visual_pools[item["categories"][0]]) > 1 and _clip_id(candidate[0]) == previous_hook:
                     continue
-                candidate_signature = _visual_signature(candidate)
+                candidate_signature = _visual_signature([_clip_id(clip) for clip in candidate])
                 if candidate_signature not in visual_signatures and candidate_signature not in forbidden["visual"]:
                     selected, visual_signature = candidate, candidate_signature
                     break
@@ -616,7 +705,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                                         count=count, forbidden=forbidden, audio_durations=audio_durations, active=active,
                                         selling_counts=selling_counts)
         visual_signatures.add(visual_signature)
-        asset_usage.update(clip["assetId"] for clip in selected)
+        asset_usage.update(_clip_id(clip) for clip in selected)
         previous_hook = _clip_id(selected[0])
         _attach_visual(item, selected, visual_signature, catalog_path, voice_path)
 
@@ -639,6 +728,36 @@ def _atomic_text(path, value):
 
 def _atomic_json(path, value):
     _atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def reserve_batch(workspace, manifest_path):
+    manifest_path = _inside(workspace, manifest_path, "manifest")
+    with _history_lock(workspace):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        history = history_signatures(workspace, excluding=manifest_path)
+        for item in manifest["items"]:
+            for key in ("copy", "text", "visual"):
+                if item[f"{key}Signature"] in history[key]:
+                    raise ValueError(f"history conflict for {key}: {item['id']}")
+        manifest["batchStatus"] = "sealed"
+        manifest["sealedAt"] = datetime.now().astimezone().isoformat()
+        _atomic_json(manifest_path, manifest)
+    return manifest
+
+
+def archive_batch(workspace, manifest_path, reason):
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("archive reason must be non-empty")
+    manifest_path = _inside(workspace, manifest_path, "manifest")
+    with _history_lock(workspace):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("batchStatus") == "complete":
+            raise ValueError("completed batches cannot be archived")
+        manifest["batchStatus"] = "archived"
+        manifest["archivedAt"] = datetime.now().astimezone().isoformat()
+        manifest["archiveReason"] = reason.strip()
+        _atomic_json(manifest_path, manifest)
+    return manifest
 
 
 def write_batch(batch, batch_dir, copy_csv):
