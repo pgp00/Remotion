@@ -300,49 +300,109 @@ def _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage
 
 
 def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, catalog_path, voice_path,
-                         count, forbidden, audio_durations, active):
-    copy_signatures, text_signatures, visual_signatures = set(), set(), set()
-    sentence_usage, asset_usage = Counter(), Counter()
-    items = []
-    previous_hook = None
+                         count, forbidden, audio_durations, active, selling_counts):
     missing = [{"kind": "copy", "message": "add more hook, CTA, or selling sentences"}]
-    for categories, candidate in _iter_exhaustive_copy_candidates(pools, active, seed):
-        item = _copy_item(index=len(items), batch_id=batch_id, selling_count=len(categories),
-                          categories=("hook", *categories, "cta"), selected_sentences=candidate)
-        if (item["copySignature"] in copy_signatures or item["copySignature"] in forbidden["copy"]
-                or item["textSignature"] in text_signatures or item["textSignature"] in forbidden["text"]):
-            continue
-        material_missing = _material_missing(item, visual_pools, audio_durations)
-        if material_missing:
-            missing = material_missing
-            continue
-        selected = None
-        visual_signature = None
-        for visual_candidate in _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations):
-            if (previous_hook and len(visual_pools[item["categories"][0]]) > 1
-                    and _clip_id(visual_candidate[0]) == previous_hook):
-                continue
-            candidate_signature = _sha(_canonical([
+    narratives = {}
+    narrative_edges = {}
+    edge_sources = {}
+    edge_seen = {}
+    match_left, match_right = {}, {}
+    groups = Counter(selling_counts)
+    group_nodes = {selling_count: [] for selling_count in groups}
+    group_matches = Counter()
+    seen_narratives = set()
+    next_node = 0
+
+    def edges(node):
+        cached = narrative_edges[node]
+        for value in cached:
+            yield value
+        source = edge_sources[node]
+        seen = edge_seen[node]
+        while True:
+            try:
+                visual_candidate = next(source)
+            except StopIteration:
+                return
+            visual_signature = _sha(_canonical([
                 (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
                 for clip in visual_candidate
             ]))
-            if candidate_signature not in visual_signatures and candidate_signature not in forbidden["visual"]:
-                selected, visual_signature = visual_candidate, candidate_signature
+            if visual_signature in seen or visual_signature in forbidden["visual"]:
+                continue
+            seen.add(visual_signature)
+            value = visual_signature, visual_candidate
+            cached.append(value)
+            yield value
+
+    def augment(node, visited):
+        for visual_signature, _ in edges(node):
+            if visual_signature in visited:
+                continue
+            visited.add(visual_signature)
+            owner = match_right.get(visual_signature)
+            if owner is None or augment(owner, visited):
+                match_right[visual_signature] = node
+                match_left[node] = visual_signature
+                return True
+        return False
+
+    # ponytail: matching runs only after fast path and caches visited edges; replace if measured scans bottleneck.
+    for selling_count in sorted(groups):
+        source = _iter_exhaustive_copy_candidates(pools, active, seed)
+        target = groups[selling_count]
+        while group_matches[selling_count] < target:
+            try:
+                categories, candidate = next(source)
+            except StopIteration:
                 break
-        if selected is None:
-            missing = [{"kind": "material", "message": "add more category clips"}]
-            continue
-        _attach_visual(item, selected, visual_signature, catalog_path, voice_path)
-        copy_signatures.add(item["copySignature"])
-        text_signatures.add(item["textSignature"])
-        visual_signatures.add(visual_signature)
+            if len(categories) != selling_count:
+                continue
+            item = _copy_item(index=0, batch_id=batch_id, selling_count=selling_count,
+                              categories=("hook", *categories, "cta"), selected_sentences=candidate)
+            narrative_key = (item["copySignature"], item["textSignature"])
+            if (narrative_key in seen_narratives or item["copySignature"] in forbidden["copy"]
+                    or item["textSignature"] in forbidden["text"]):
+                continue
+            seen_narratives.add(narrative_key)
+            material_missing = _material_missing(item, visual_pools, audio_durations)
+            if material_missing:
+                missing = material_missing
+                continue
+            node = next_node
+            next_node += 1
+            narratives[node] = item
+            narrative_edges[node] = []
+            edge_sources[node] = _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations)
+            edge_seen[node] = set()
+            group_nodes[selling_count].append(node)
+            if augment(node, set()):
+                group_matches[selling_count] += 1
+            else:
+                missing = [{"kind": "material", "message": "add more category clips"}]
+        if group_matches[selling_count] < target:
+            exact = sum(group_matches.values())
+            raise CapacityError(exact, missing)
+
+    items = []
+    sentence_usage, asset_usage = Counter(), Counter()
+    queues = {
+        selling_count: [node for node in nodes if node in match_left]
+        for selling_count, nodes in group_nodes.items()
+    }
+    for index, selling_count in enumerate(selling_counts):
+        node = queues[selling_count].pop(0)
+        item = narratives[node]
+        visual_signature = match_left[node]
+        visual_candidate = next(candidate for signature, candidate in narrative_edges[node]
+                                if signature == visual_signature)
+        item["id"] = f"{PRODUCT_SKU}-{batch_id}-{index + 1:03d}"
+        item["title"] = f"S5Max {batch_id} 每日组合 {index + 1:03d}"
+        _attach_visual(item, visual_candidate, visual_signature, catalog_path, voice_path)
         sentence_usage.update(item["sourceSentenceIds"])
-        asset_usage.update(clip["assetId"] for clip in selected)
-        previous_hook = _clip_id(selected[0])
+        asset_usage.update(clip["assetId"] for clip in visual_candidate)
         items.append(item)
-        if len(items) == count:
-            return _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage, items)
-    raise CapacityError(len(items), missing)
+    return _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage, items)
 
 
 def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_path, count=300,
@@ -363,7 +423,8 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
     if FAST_ATTEMPTS == 0:
         return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
                                     input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
-                                    count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
+                                    count=count, forbidden=forbidden, audio_durations=audio_durations, active=active,
+                                    selling_counts=selling_counts)
     sentence_usage, category_usage, template_usage = Counter(), Counter(), Counter()
     copy_signatures, text_signatures = set(), set()
     items = []
@@ -449,7 +510,8 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
         if missing:
             return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
                                         input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
-                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
+                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active,
+                                        selling_counts=selling_counts)
         for attempt in range(FAST_ATTEMPTS):
             selected, used_ids, used_fingerprints = [], set(), set()
             complete = True
@@ -466,7 +528,8 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                 if not long_enough:
                     return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
                                                 input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
-                                                count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
+                                                count=count, forbidden=forbidden, audio_durations=audio_durations, active=active,
+                                                selling_counts=selling_counts)
                 try:
                     clip = _pick_balanced(long_enough, asset_usage, seed, "visual", index, attempt, slot,
                                           excluded_ids=excluded_ids, excluded_fingerprints=used_fingerprints)
@@ -497,7 +560,8 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
         if selected is None or visual_signature is None:
             return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
                                         input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
-                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
+                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active,
+                                        selling_counts=selling_counts)
         visual_signatures.add(visual_signature)
         asset_usage.update(clip["assetId"] for clip in selected)
         previous_hook = _clip_id(selected[0])

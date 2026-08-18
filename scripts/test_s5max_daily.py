@@ -168,37 +168,40 @@ class DailyPlanTest(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            csv_path = root / "small-copy.csv"
-            with csv_path.open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["category", "text"])
-                writer.writerows((category, category) for category in ("hook", "cta", "shave", "blade", "power", "water"))
-            clips = []
-            for asset_id, category in (
-                ("hook", "hook"), ("shave", "shave"), ("blade", "power"), ("power", "power"),
-                ("water", "water"), ("charge", "charge"), ("appearance", "body"), ("scene", "body"),
-                ("cta", "cta"),
-            ):
-                clips.append({
-                    "assetId": asset_id, "category": category, "label": category,
-                    "sourceInSeconds": 0, "sourceOutSeconds": 20,
-                    "quickFingerprint": f"fp-{asset_id}",
-                })
-            assets_path = root / "materials.json"
-            assets_path.write_text(json.dumps({"selection": {"clipLibrary": clips}}), encoding="utf-8")
-            pools, _ = module.load_copy_pool(csv_path)
-            active = tuple(category for category in module.SELLING if pools.get(category))
-            signatures = set()
-            for categories, candidates in module._exhaustive_copy_candidates(pools, active, "capacity-seed"):
-                for selected in candidates:
-                    signatures.add(module._sha("|".join(item["sentenceId"] for item in selected)))
+            csv_path, assets_path = fixture(root)
+            seed = "capacity-seed"
+            categories = tuple(module.SELLING[:3])
+
+            def sentence(label, category):
+                return {"sentenceId": f"{label}-{category}", "sourceText": f"{label}-{category}",
+                        "normalizedText": f"{label}-{category}。"}
+
+            candidates = [
+                (categories, tuple([sentence("A", "hook"), *(sentence("A", category) for category in categories),
+                                    sentence("A", "cta")])),
+            ]
+            clips = {
+                asset_id: {"assetId": asset_id, "quickFingerprint": f"fp-{asset_id}",
+                           "sourceInSeconds": 0, "sourceOutSeconds": 8}
+                for asset_id in ("x",)
+            }
+
+            def copy_candidates(_pools, _active, _seed):
+                yield from candidates
+
+            def visual_candidates(item, _visual_pools, _seed, _audio_durations):
+                yield tuple(clips["x"] for _ in item["categories"])
+
             forbidden = {"copy": set(), "text": set(), "visual": set()}
             with patch.object(module, "FAST_ATTEMPTS", 0), self.assertRaises(module.CapacityError) as raised:
-                module.plan_batch(batch_id="capacity", seed="capacity-seed", copy_csv=csv_path,
+                with patch.object(module, "_iter_exhaustive_copy_candidates", side_effect=copy_candidates), \
+                        patch.object(module, "_exhaustive_visual_candidates", side_effect=visual_candidates), \
+                        patch.object(module, "_material_missing", return_value=[]):
+                    module.plan_batch(batch_id="capacity", seed=seed, copy_csv=csv_path,
                                   materials_path=assets_path, catalog_path="catalog.json", voice_path="voice.wav",
-                                  count=len(signatures) + 1, forbidden=forbidden)
+                                  count=2, forbidden=forbidden)
 
-        self.assertEqual(raised.exception.exact, len(signatures))
+        self.assertEqual(raised.exception.exact, 1)
         self.assertEqual(raised.exception.missing[0]["kind"], "copy")
 
     def test_exhaustive_copy_fallback_skips_visually_impossible_copy(self):
@@ -221,6 +224,73 @@ class DailyPlanTest(unittest.TestCase):
 
         self.assertEqual(len(batch["items"]), 1)
         self.assertNotIn(impossible["sentenceId"], batch["items"][0]["sourceSentenceIds"])
+
+    def test_exhaustive_fallback_preserves_selling_counts_by_position(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            count, seed = 3, "distribution-seed"
+            expected = module._selling_counts(count, seed)
+            with patch.object(module, "FAST_ATTEMPTS", 0):
+                batch = module.plan_batch(
+                    batch_id="distribution", seed=seed, copy_csv=csv_path, materials_path=assets_path,
+                    catalog_path="catalog.json", voice_path="voice.wav", count=count,
+                    forbidden={"copy": set(), "text": set(), "visual": set()},
+                )
+
+        self.assertEqual([item["sellingPointCount"] for item in batch["items"]], expected)
+
+    def test_joint_fallback_backtracks_hall_visual_assignments(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            seed = "hall-1"
+            self.assertEqual(module._selling_counts(3, seed), [4, 4, 3])
+
+            def sentence(label, category):
+                return {"sentenceId": f"{label}-{category}", "sourceText": f"{label}-{category}",
+                        "normalizedText": f"{label}-{category}。"}
+
+            categories_a = tuple(module.SELLING[:4])
+            categories_b = tuple(module.SELLING[:4])
+            categories_c = tuple(module.SELLING[:3])
+            candidates = [
+                (categories_a, tuple([sentence("A", "hook"), *(sentence("A", category) for category in categories_a),
+                                      sentence("A", "cta")])),
+                (categories_b, tuple([sentence("B", "hook"), *(sentence("B", category) for category in categories_b),
+                                      sentence("B", "cta")])),
+                (categories_c, tuple([sentence("C", "hook"), *(sentence("C", category) for category in categories_c),
+                                      sentence("C", "cta")])),
+            ]
+            clips = {
+                asset_id: {"assetId": asset_id, "quickFingerprint": f"fp-{asset_id}",
+                           "sourceInSeconds": 0, "sourceOutSeconds": 8}
+                for asset_id in ("x", "y", "z")
+            }
+
+            def copy_candidates(_pools, _active, _seed):
+                yield from candidates
+
+            def visual_candidates(item, _visual_pools, _seed, _audio_durations):
+                label = item["sourceSentenceIds"][0].split("-", 1)[0]
+                choices = {"A": ("x", "y"), "B": ("x",), "C": ("z",)}[label]
+                for asset_id in choices:
+                    yield tuple(clips[asset_id] for _ in item["categories"])
+
+            with patch.object(module, "FAST_ATTEMPTS", 0), \
+                    patch.object(module, "_iter_exhaustive_copy_candidates", side_effect=copy_candidates), \
+                    patch.object(module, "_exhaustive_visual_candidates", side_effect=visual_candidates), \
+                    patch.object(module, "_material_missing", return_value=[]):
+                batch = module.plan_batch(
+                    batch_id="hall", seed=seed, copy_csv=csv_path, materials_path=assets_path,
+                    catalog_path="catalog.json", voice_path="voice.wav", count=3,
+                    forbidden={"copy": set(), "text": set(), "visual": set()},
+                )
+
+        self.assertEqual(len(batch["items"]), 3)
+        self.assertEqual([item["visualSlots"][0]["assetId"] for item in batch["items"]], ["y", "x", "z"])
 
     def test_scripts_json_persists_source_sentences(self):
         module = load_module()
