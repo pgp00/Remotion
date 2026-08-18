@@ -1,4 +1,4 @@
 interface:
   display_name: "商品营销自动剪辑"
-  short_description: "使用 SKU 和脚本规划并生成可审核的营销视频草稿"
-  default_prompt: "Use $auto-edit-product-video to prepare one traceable real-footage Timeline from an explicit batch and user script, then render only after approval."
+  short_description: "默认单条或批量将原始文案制作成本地语音 Remotion 成片"
+  default_prompt: "Use $auto-edit-product-video as the only workflow. Accept the user's raw copy, default to one unique video, or plan a user-confirmed batch of 300; create the classified copy pool internally, use visually verified local SMB footage and local IndexTTS 2.5, gate a batch on one approved sample, and render every final MP4 through the single Remotion production core."

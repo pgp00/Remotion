@@ -1,46 +1,34 @@
-# Remotion 自动剪辑项目骨架
+# 本地商品视频统一生产
 
-## 目标
+这是唯一的用户工作流：用户只提供未经分类的原始文案，并可选 `single` 或 `batch` 模式；未指定模式默认单条。Codex 自主保存原文、拆句分类、组合、检索并视觉核验本地 SMB 镜头、预热本地 IndexTTS 2.5，再通过同一个 Remotion 单条生产内核逐句对齐音画并完成 QC。
 
-从空仓库搭建一个可运行的 npm workspace，并先把 SMB 素材变成可检索、可人工快速确认的生产基础库。网页可以启动，Remotion Studio 可以预览，示例商品视频可以渲染，自动剪辑继续按候选素材按需生成代理。
+## 用户工作流
 
-暂时无法完成的真实能力不做假实现，统一记录在 [`DEFERRED_CAPABILITIES.md`](./DEFERRED_CAPABILITIES.md)。
+1. 保存 `source-copy.txt`，内部生成 `category,text` 的 `copy-pool.csv`；用户不填写 CSV、ProductionPlan、时间线或镜头表。
+2. 单条固定生产 1 条唯一组合；批量默认目标 300 条，先报告有效容量、预计耗时和磁盘空间并等待数量确认。
+3. 容量不足时扩展本地 SMB，使用 `view_image` 核验 contact/CTA sheets 后更新内部素材矩阵。
+4. 逐句调用本地 IndexTTS 2.5，按真实 WAV 时长选片，批量只渲染 1 条样片并等待批准；批准后才渲染剩余条目，拒绝则归档整批。
+5. 交付正式 MP4 目录和简短汇总，保留内部计划、manifest、缓存、联系表、QC 和重试记录。
 
-## 工程结构
+## 六个内部协调命令
 
-- `apps/web`：本地单用户审核工作台。
-- `packages/remotion-video`：Remotion 商品营销视频模板。
-- `packages/shared`：产品、素材镜头和时间线共享类型。
-- `packages/core`：示例数据、校验逻辑和外部能力接口。
-- `skills/auto-edit-product-video`：项目内 Codex 自动剪辑技能。
-- `scripts/asset-library.mjs`：SMB 只读扫描、指纹、联系表、CTA 四帧图、质量标记、断点恢复和本地检索。
-- `docs/DEFERRED_CAPABILITIES.md`：尚未接入能力及其完成标准。
+唯一公开协调器 `scripts/s5max-daily.py` 只提供：
 
-> 当前环境不允许写入仓库根目录下的 `.agents` 特殊目录，因此项目技能源码保存在普通的 `skills/` 目录，后续可按 Codex 环境需要安装或映射到技能发现目录。
+- `capacity`：计算单条/批量有效容量，并在批量昂贵阶段前报告容量、耗时和空间。
+- `prepare`：生成内部文案池、一次性随机批次、真实 WAV 和封存 manifest。
+- `sample`：批量只渲染 1 条代表性样片。
+- `approve`：记录样片批准，开放剩余条目。
+- `reject`：归档整批并释放预留签名。
+- `render`：单条直接交付，或在批准后渲染批量剩余条目。
 
-## 可运行基线
+`scripts/produce.mjs` 是唯一的单条生产内核；协调器不自行编码视频，也不创建第二套 TTS、Remotion 或 QC。最终视频固定由 `ProductMarketingProduction` Remotion Composition 生成，素材只来自本地 SMB，语音只来自本地 IndexTTS 2.5。
 
-- 使用 npm workspaces、TypeScript、React、Vite 和 Remotion。
-- `npm run dev` 启动审核网页。
-- `npm run studio` 启动 Remotion Studio。
-- `npm run render:demo` 渲染示例竖屏 MP4。
-- `npm run typecheck` 检查所有 workspace。
-- 示例时间线为 1080×1920、24 秒的商品营销草稿，不依赖外部素材。
-- 网页和 Remotion 共同消费 `Timeline` 数据结构。
-- 资产库所有衍生物写入 `work/asset-library/`，不向 SMB 写入，不全量生成代理。
-- 未配置的 NAS、AI、TTS 等能力必须明确返回 `not_configured`。
+## 开发命令
 
-## 验收标准
+- `node --test scripts/skill-contract.test.mjs`：验证唯一入口和文档合同。
+- `npm test`：运行保留的 Node 回归测试。
+- `python3 -m unittest scripts/test_indextts25_batch.py`：运行本地 TTS 回归测试。
+- `npm run typecheck`：检查 Remotion 源码。
+- `npm run studio`：打开唯一生产 Composition 和联系表 Still。
 
-- 全新安装依赖后，网页和 Remotion Studio 均可启动。
-- 示例 Composition 可以预览并渲染 MP4。
-- Web、Remotion 和核心逻辑共用相同的时间线类型。
-- TypeScript 检查与 Codex 技能结构校验通过。
-- 项目中不伪造 NAS、AI、TTS 或真实素材分析结果。
-
-## 当前假设
-
-- 第一阶段为单用户本地开发环境，不实现登录和权限。
-- 当前机器已经安装 Node.js、npm 和 FFmpeg。
-- 真实 SMB 全量运行仍需在挂载后人工启动；本地框架不自动挂载或写入共享盘。
-- Codex 负责剪辑决策；确定性的资产扫描、索引、抽帧、配音和渲染能力由工具实现。
+生产缓存和审计材料保存在 `work/`，成片保存在 `out/`；两者均不得由源码清理任务删除。旧 `work/s5max-daily` 和 `out/s5max-daily` 是保留的历史产物，不是新入口，也不与统一用户工作流并行。SMB 始终只读，文案与完整镜头序列必须避开当前批次、已预留批次和历史正式成片。
