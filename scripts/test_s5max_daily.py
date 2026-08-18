@@ -1,5 +1,7 @@
 import csv
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -124,6 +126,30 @@ class DailyPlanTest(unittest.TestCase):
         self.assertNotEqual(first["items"][0]["copySignature"], next_batch["items"][0]["copySignature"])
         self.assertNotEqual(first["items"][0]["visualSignature"], next_batch["items"][0]["visualSignature"])
 
+    def test_rejects_explicit_empty_forbidden_structure(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            with self.assertRaisesRegex(ValueError, "forbidden"):
+                module.plan_batch(batch_id="bad-forbidden", seed="seed", copy_csv=csv_path,
+                                  materials_path=assets_path, catalog_path="catalog.json", voice_path="voice.wav",
+                                  count=1, forbidden={})
+
+    def test_text_signature_forbidden_is_respected(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            common = dict(batch_id="text-a", seed="text-seed", copy_csv=csv_path, materials_path=assets_path,
+                          catalog_path="catalog.json", voice_path="voice.wav", count=1)
+            empty = {"copy": set(), "text": set(), "visual": set()}
+            first = module.plan_batch(**common, forbidden=empty)
+            blocked = {"copy": set(), "text": {first["items"][0]["textSignature"]}, "visual": set()}
+            next_batch = module.plan_batch(**{**common, "batch_id": "text-b"}, forbidden=blocked)
+
+        self.assertNotEqual(first["items"][0]["textSignature"], next_batch["items"][0]["textSignature"])
+
     def test_exhaustive_fallback_has_no_fixed_attempt_ceiling(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
@@ -174,6 +200,58 @@ class DailyPlanTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.exact, len(signatures))
         self.assertEqual(raised.exception.missing[0]["kind"], "copy")
+
+    def test_exhaustive_copy_fallback_skips_visually_impossible_copy(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            pools, _ = module.load_copy_pool(csv_path)
+            active = tuple(category for category in module.SELLING if pools.get(category))
+            _, first_candidate = next(module._iter_exhaustive_copy_candidates(pools, active, "joint-seed"))
+            impossible = first_candidate[1]
+            audio_durations = {module._tts_text(impossible["normalizedText"]): 99}
+            with patch.object(module, "FAST_ATTEMPTS", 0):
+                batch = module.plan_batch(
+                    batch_id="joint", seed="joint-seed", copy_csv=csv_path, materials_path=assets_path,
+                    catalog_path="catalog.json", voice_path="voice.wav", count=1,
+                    forbidden={"copy": set(), "text": set(), "visual": set()},
+                    audio_durations=audio_durations,
+                )
+
+        self.assertEqual(len(batch["items"]), 1)
+        self.assertNotIn(impossible["sentenceId"], batch["items"][0]["sourceSentenceIds"])
+
+    def test_scripts_json_persists_source_sentences(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            batch = module.plan_batch(batch_id="persist", seed="persist-seed", copy_csv=csv_path,
+                                      materials_path=assets_path, catalog_path="catalog.json", voice_path="voice.wav",
+                                      count=1, forbidden={"copy": set(), "text": set(), "visual": set()})
+            module.write_batch(batch, root / "batch", csv_path)
+            scripts = json.loads((root / "batch/scripts.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(scripts["items"][0]["sourceSentences"], batch["items"][0]["sourceSentences"])
+
+    def test_legacy_plan_cli_uses_new_batch_arguments(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            output = io.StringIO()
+            with patch.object(module, "_validate_catalog"), patch.object(module, "write_batch",
+                                                                         return_value=root / "manifest.json"):
+                with contextlib.redirect_stdout(output):
+                    module.main([
+                        "plan", "--date", "2026-08-18", "--copy-csv", str(csv_path),
+                        "--materials", str(assets_path), "--catalog", str(root / "catalog.json"),
+                        "--voice", "voice.wav", "--count", "300",
+                    ])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["targetCount"], 300)
 
     def test_render_resumes_completed_items_without_relaunching(self):
         module = load_module()

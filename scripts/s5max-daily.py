@@ -269,9 +269,86 @@ def _material_missing(item, visual_pools, audio_durations):
     return missing
 
 
+def _attach_visual(item, selected, visual_signature, catalog_path, voice_path):
+    slots = [{
+        "category": category, "assetId": clip["assetId"], "quickFingerprint": clip["quickFingerprint"],
+        "sourceInSeconds": clip["sourceInSeconds"], "sourceOutSeconds": clip["sourceOutSeconds"],
+    } for category, clip in zip(item["categories"], selected)]
+    item["visualSlots"] = slots
+    item["visualSignature"] = visual_signature
+    item["plan"] = {
+        "schemaVersion": 1, "id": item["id"], "title": item["title"],
+        "sourceText": "".join(item["subtitleTexts"]), "catalogPath": str(catalog_path),
+        "voice": {"promptPath": str(voice_path), "durationFactor": 1},
+        "sentences": [{
+            "id": f"s{slot + 1:02d}", "text": text, "ttsText": _tts_text(text),
+            "shot": {"sourceId": visual["assetId"], "sourceInSeconds": visual["sourceInSeconds"],
+                     "sourceOutSeconds": visual["sourceOutSeconds"], "fit": "cover", "focusX": 0.5, "focusY": 0.5},
+        } for slot, (text, visual) in enumerate(zip(item["subtitleTexts"], slots))],
+    }
+
+
+def _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage, items):
+    return {
+        "schemaVersion": 2, "batchId": batch_id, "productSku": PRODUCT_SKU, "inputHash": input_hash,
+        "seed": seed, "targetCount": count,
+        "sellingPointDistribution": {str(value): sum(item["sellingPointCount"] == value for item in items)
+                                     for value in (2, 3, 4)},
+        "sentenceUsage": dict(sorted(sentence_usage.items())), "assetUsage": dict(sorted(asset_usage.items())),
+        "items": items,
+    }
+
+
+def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, catalog_path, voice_path,
+                         count, forbidden, audio_durations, active):
+    copy_signatures, text_signatures, visual_signatures = set(), set(), set()
+    sentence_usage, asset_usage = Counter(), Counter()
+    items = []
+    previous_hook = None
+    missing = [{"kind": "copy", "message": "add more hook, CTA, or selling sentences"}]
+    for categories, candidate in _iter_exhaustive_copy_candidates(pools, active, seed):
+        item = _copy_item(index=len(items), batch_id=batch_id, selling_count=len(categories),
+                          categories=("hook", *categories, "cta"), selected_sentences=candidate)
+        if (item["copySignature"] in copy_signatures or item["copySignature"] in forbidden["copy"]
+                or item["textSignature"] in text_signatures or item["textSignature"] in forbidden["text"]):
+            continue
+        material_missing = _material_missing(item, visual_pools, audio_durations)
+        if material_missing:
+            missing = material_missing
+            continue
+        selected = None
+        visual_signature = None
+        for visual_candidate in _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations):
+            if (previous_hook and len(visual_pools[item["categories"][0]]) > 1
+                    and _clip_id(visual_candidate[0]) == previous_hook):
+                continue
+            candidate_signature = _sha(_canonical([
+                (_clip_id(clip), clip["sourceInSeconds"], clip["sourceOutSeconds"])
+                for clip in visual_candidate
+            ]))
+            if candidate_signature not in visual_signatures and candidate_signature not in forbidden["visual"]:
+                selected, visual_signature = visual_candidate, candidate_signature
+                break
+        if selected is None:
+            missing = [{"kind": "material", "message": "add more category clips"}]
+            continue
+        _attach_visual(item, selected, visual_signature, catalog_path, voice_path)
+        copy_signatures.add(item["copySignature"])
+        text_signatures.add(item["textSignature"])
+        visual_signatures.add(visual_signature)
+        sentence_usage.update(item["sourceSentenceIds"])
+        asset_usage.update(clip["assetId"] for clip in selected)
+        previous_hook = _clip_id(selected[0])
+        items.append(item)
+        if len(items) == count:
+            return _batch_result(batch_id, input_hash, seed, count, sentence_usage, asset_usage, items)
+    raise CapacityError(len(items), missing)
+
+
 def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_path, count=300,
                forbidden=None, audio_durations=None):
-    forbidden = forbidden or {"copy": set(), "text": set(), "visual": set()}
+    if forbidden is None:
+        forbidden = {"copy": set(), "text": set(), "visual": set()}
     required_forbidden = {"copy", "text", "visual"}
     if set(forbidden) != required_forbidden or any(not isinstance(forbidden[key], set) for key in required_forbidden):
         raise ValueError("forbidden must contain copy, text, and visual sets")
@@ -283,6 +360,10 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
     visual_pools = load_visual_pools(materials_path)
     selling_counts = _selling_counts(count, seed)
     active = tuple(category for category in SELLING if pools.get(category))
+    if FAST_ATTEMPTS == 0:
+        return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
+                                    input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
+                                    count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
     sentence_usage, category_usage, template_usage = Counter(), Counter(), Counter()
     copy_signatures, text_signatures = set(), set()
     items = []
@@ -366,7 +447,9 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
         visual_signature = None
         missing = _material_missing(item, visual_pools, audio_durations)
         if missing:
-            raise CapacityError(index, missing)
+            return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
+                                        input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
+                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
         for attempt in range(FAST_ATTEMPTS):
             selected, used_ids, used_fingerprints = [], set(), set()
             complete = True
@@ -381,7 +464,9 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                 long_enough = [clip for clip in visual_pools[category]
                                if clip["sourceOutSeconds"] - clip["sourceInSeconds"] >= required_seconds]
                 if not long_enough:
-                    raise CapacityError(index, _material_missing(item, visual_pools, audio_durations))
+                    return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
+                                                input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
+                                                count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
                 try:
                     clip = _pick_balanced(long_enough, asset_usage, seed, "visual", index, attempt, slot,
                                           excluded_ids=excluded_ids, excluded_fingerprints=used_fingerprints)
@@ -410,29 +495,13 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                     selected, visual_signature = candidate, candidate_signature
                     break
         if selected is None or visual_signature is None:
-            raise CapacityError(index, [{
-                "kind": "material",
-                "message": "add more category clips",
-            }])
+            return _plan_joint_fallback(batch_id=batch_id, seed=seed, pools=pools, visual_pools=visual_pools,
+                                        input_hash=input_hash, catalog_path=catalog_path, voice_path=voice_path,
+                                        count=count, forbidden=forbidden, audio_durations=audio_durations, active=active)
         visual_signatures.add(visual_signature)
         asset_usage.update(clip["assetId"] for clip in selected)
         previous_hook = _clip_id(selected[0])
-        slots = [{
-            "category": category, "assetId": clip["assetId"], "quickFingerprint": clip["quickFingerprint"],
-            "sourceInSeconds": clip["sourceInSeconds"], "sourceOutSeconds": clip["sourceOutSeconds"],
-        } for category, clip in zip(item["categories"], selected)]
-        item["visualSlots"] = slots
-        item["visualSignature"] = visual_signature
-        item["plan"] = {
-            "schemaVersion": 1, "id": item["id"], "title": item["title"],
-            "sourceText": "".join(item["subtitleTexts"]), "catalogPath": str(catalog_path),
-            "voice": {"promptPath": str(voice_path), "durationFactor": 1},
-            "sentences": [{
-                "id": f"s{slot + 1:02d}", "text": text, "ttsText": _tts_text(text),
-                "shot": {"sourceId": visual["assetId"], "sourceInSeconds": visual["sourceInSeconds"],
-                         "sourceOutSeconds": visual["sourceOutSeconds"], "fit": "cover", "focusX": 0.5, "focusY": 0.5},
-            } for slot, (text, visual) in enumerate(zip(item["subtitleTexts"], slots))],
-        }
+        _attach_visual(item, selected, visual_signature, catalog_path, voice_path)
 
     return {
         "schemaVersion": 2, "batchId": batch_id, "productSku": PRODUCT_SKU, "inputHash": input_hash,
@@ -468,7 +537,7 @@ def write_batch(batch, batch_dir, copy_csv):
     for item in batch["items"]:
         plan_name = f"plans/{item['id']}.json"
         _atomic_json(batch_dir / plan_name, item["plan"])
-        scripts.append({key: item[key] for key in ("id", "title", "sellingPointCount", "categories", "sourceSentenceIds", "sourceTexts", "subtitleTexts", "copySignature", "textSignature")})
+        scripts.append({key: item[key] for key in ("id", "title", "sellingPointCount", "categories", "sourceSentenceIds", "sourceSentences", "sourceTexts", "subtitleTexts", "copySignature", "textSignature")})
         matrix.append({"id": item["id"], "visualSignature": item["visualSignature"], "slots": item["visualSlots"]})
         old = old_items.get(item["id"], {})
         manifest_items.append({
@@ -623,15 +692,15 @@ def main(argv=None):
     if args.command == "plan":
         if args.count != 300:
             raise ValueError("daily production count must be exactly 300")
-        batch = plan_batch(date=args.date, copy_csv=args.copy_csv, materials_path=args.materials,
+        batch = plan_batch(batch_id=args.date, seed=args.date, copy_csv=args.copy_csv, materials_path=args.materials,
                            catalog_path=args.catalog, voice_path=args.voice, count=args.count)
         _validate_catalog(batch, args.catalog)
         batch_dir = args.work_dir or Path("work/s5max-daily") / args.date
         manifest = write_batch(batch, batch_dir, args.copy_csv)
-        print(json.dumps({"count": batch["count"], "inputHash": batch["inputHash"], "manifest": str(manifest)}, ensure_ascii=False))
+        print(json.dumps({"targetCount": batch["targetCount"], "inputHash": batch["inputHash"], "manifest": str(manifest)}, ensure_ascii=False))
     else:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        out_dir = args.out_dir or Path("out/s5max-daily") / manifest["date"]
+        out_dir = args.out_dir or Path("out/s5max-daily") / manifest.get("batchId", manifest.get("date", "batch"))
         result = render_batch(manifest_path=args.manifest, workspace=args.workspace, model_dir=args.model_dir,
                               index_python=args.index_python, out_dir=out_dir, jobs=args.jobs, limit=args.limit,
                               item_id=args.item_id, device=args.device)
