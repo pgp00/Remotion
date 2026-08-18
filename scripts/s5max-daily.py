@@ -1093,92 +1093,270 @@ def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, cat
         )
 
 
-def render_batch(*, manifest_path, workspace, model_dir, index_python, out_dir, jobs=1, limit=None, item_id=None, device="mps"):
-    workspace = Path(workspace).resolve()
-    manifest_path = _inside(workspace, manifest_path, "manifest")
-    batch_dir = manifest_path.parent
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    selected_items = [item for item in manifest["items"] if not item_id or item["id"] == item_id]
-    selected_items = selected_items[:limit] if limit else selected_items
-    plans = [(item, json.loads(_inside(workspace, batch_dir / item["planPath"], "plan").read_text(encoding="utf-8"))) for item in selected_items]
-    if not plans:
-        raise ValueError("batch contains no selected plans")
-    out_dir = _inside(workspace, out_dir, "out-dir")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pending = []
-    for item, plan in plans:
-        output = out_dir / f"{item['id']}.mp4"
-        production_manifest = workspace / "work/production" / item["id"] / "manifest.json"
-        if output.is_file() and production_manifest.is_file():
-            item["status"], item["outputPath"] = "verified", str(output)
-            item.pop("error", None)
-        else:
-            pending.append((item, plan))
-    if not pending:
-        _atomic_json(manifest_path, manifest)
-        return {"selected": len(plans), "rendered": 0, "verified": len(plans), "outDir": str(out_dir)}
-
-    voice = plans[0][1]["voice"]
-    if any(plan["voice"] != voice for _, plan in plans):
-        raise ValueError("one render batch must use one voice contract")
-
-    unique_tasks = list({(sentence["ttsText"], voice["durationFactor"]): {"text": sentence["ttsText"], "duration_factor": voice["durationFactor"]}
-                         for _, plan in pending for sentence in plan["sentences"]}.values())
-    prewarm = batch_dir / "tts-prewarm.jsonl"
-    _atomic_text(prewarm, "".join(json.dumps(task, ensure_ascii=False) + "\n" for task in unique_tasks))
-    cache_dir = workspace / "work/indextts25/cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+def _run_producer(*, item, batch_dir, workspace, model_dir, index_python, out_dir):
+    output = Path(out_dir) / f"{item['id']}.mp4"
+    if output.exists():
+        raise ValueError(f"unverified final output already exists: {output}")
+    workspace = Path(workspace)
+    batch_dir = Path(batch_dir)
+    work_dir = workspace / "work/production" / item["id"]
+    partial = Path(out_dir) / f"{item['id']}.partial.mp4"
+    stale = [path for path in (work_dir, partial) if path.exists()]
+    if stale:
+        retry_dir = batch_dir / "retries" / f"{item['id']}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        retry_dir.mkdir(parents=True)
+        for path in stale:
+            shutil.move(str(path), retry_dir / path.name)
+    plan = _inside(batch_dir, batch_dir / item["planPath"], "plan")
     subprocess.run([
-        str(index_python), str(workspace / "scripts/indextts25-batch.py"), "--batch-file", str(prewarm),
-        "--voice", str(_inside(workspace, workspace / voice["promptPath"], "voice")), "--model-dir", str(model_dir),
-        "--output-dir", str(cache_dir), "--expected-count", str(len(unique_tasks)), "--output-prefix", "sentence",
-        "--manifest", str(batch_dir / "tts-prewarm-manifest.json"), "--device", device,
+        "node", str(workspace / "scripts/produce.mjs"), "--plan", str(plan),
+        "--model-dir", str(model_dir), "--python", str(index_python), "--out-dir", str(out_dir),
     ], cwd=workspace, check=True)
-    by_id = {item["id"]: item for item in manifest["items"]}
-    for item, _ in pending:
-        if item.get("status") not in ("verified",):
-            by_id[item["id"]]["status"] = "voiced"
-            by_id[item["id"]].pop("error", None)
-    _atomic_json(manifest_path, manifest)
+    production_manifest = workspace / "work/production" / item["id"] / "manifest.json"
+    if (not output.is_file() or output.is_symlink()
+            or not production_manifest.is_file() or production_manifest.is_symlink()):
+        raise RuntimeError(f"producer did not atomically publish {item['id']}")
+    return str(output)
 
-    def produce(pair):
-        item, _ = pair
-        output = out_dir / f"{item['id']}.mp4"
-        if output.exists():
-            return item["id"], "failed", None, f"unverified final output already exists: {output}"
-        work_dir = workspace / "work/production" / item["id"]
-        partial = out_dir / f"{item['id']}.partial.mp4"
-        stale = [path for path in (work_dir, partial) if path.exists()]
-        if stale:
-            retry_dir = batch_dir / "retries" / f"{item['id']}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
-            retry_dir.mkdir(parents=True)
-            for path in stale:
-                shutil.move(str(path), retry_dir / path.name)
-        command = ["node", str(workspace / "scripts/produce.mjs"), "--plan", str(batch_dir / item["planPath"]),
-                   "--model-dir", str(model_dir), "--python", str(index_python), "--out-dir", str(out_dir)]
-        try:
-            subprocess.run(command, cwd=workspace, check=True)
-            return item["id"], "verified", str(output), None
-        except subprocess.CalledProcessError as error:
-            return item["id"], "failed", None, f"producer exited {error.returncode}"
+
+def _representative_sample(items):
+    if not items:
+        raise ValueError("batch contains no items")
+    median_duration = statistics.median(item["plannedDurationSeconds"] for item in items)
+    return min(items, key=lambda item: (
+        abs(item["sellingPointCount"] - 3),
+        abs(item["plannedDurationSeconds"] - median_duration),
+        item["id"],
+    ))["id"]
+
+
+def _render_items(*, manifest, manifest_path, workspace, model_dir, index_python, item_ids, jobs):
+    workspace = Path(workspace).resolve()
+    manifest_path = Path(manifest_path).resolve()
+    batch_dir = manifest_path.parent
+    out_dir = _inside(workspace, manifest["outputDir"], "out-dir")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    by_id = {item["id"]: item for item in manifest["items"]}
+    pending = []
+    for item_id in item_ids:
+        if item_id not in by_id:
+            raise ValueError(f"unknown item: {item_id}")
+        item = by_id[item_id]
+        output = out_dir / f"{item_id}.mp4"
+        production = workspace / "work/production" / item_id / "manifest.json"
+        if (output.is_file() and not output.is_symlink()
+                and production.is_file() and not production.is_symlink()):
+            item.update(status="verified", outputPath=str(output))
+            item.pop("error", None)
+            continue
+        item["status"] = "voiced"
+        item["renderStartedAt"] = datetime.now().astimezone().isoformat()
+        item.pop("failedStage", None)
+        item.pop("error", None)
+        pending.append(item)
+    _atomic_json(manifest_path, manifest)
 
     failures = []
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
-        futures = [executor.submit(produce, pair) for pair in pending]
+        futures = {
+            executor.submit(
+                _run_producer, item=item, batch_dir=batch_dir, workspace=workspace,
+                model_dir=model_dir, index_python=index_python, out_dir=out_dir,
+            ): item
+            for item in pending
+        }
         for future in as_completed(futures):
-            item_id, status, output, error = future.result()
-            item = by_id[item_id]
-            item["status"] = status
-            if output:
-                item["outputPath"] = output
-                item.pop("error", None)
-            if error:
-                item["error"] = error
-                failures.append(item_id)
+            item = futures[future]
+            try:
+                future.result()
+                output = out_dir / f"{item['id']}.mp4"
+                production = workspace / "work/production" / item["id"] / "manifest.json"
+                if (not output.is_file() or output.is_symlink()
+                        or not production.is_file() or production.is_symlink()):
+                    raise RuntimeError(f"producer did not atomically publish {item['id']}")
+                item["outputPath"] = str(output)
+                item["status"] = "verified"
+                item["verifiedAt"] = datetime.now().astimezone().isoformat()
+            except Exception as error:
+                item["status"] = "voiced"
+                item["failedStage"] = "produce"
+                item["error"] = str(error)
+                failures.append(item["id"])
             _atomic_json(manifest_path, manifest)
-    if failures:
-        raise RuntimeError(f"{len(failures)} render(s) failed: {', '.join(failures[:10])}")
-    return {"selected": len(plans), "rendered": len(pending), "verified": len(plans), "outDir": str(out_dir)}
+    return {"rendered": len(pending), "failures": failures}
+
+
+def render_sample(*, manifest_path, workspace, model_dir, index_python, jobs=1):
+    workspace = Path(workspace).resolve()
+    manifest_path = _inside(workspace, manifest_path, "manifest")
+    with _batch_lock(manifest_path.parent):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("mode") != "batch":
+            raise ValueError("sample is only available in batch mode")
+        if manifest.get("batchStatus") == "sample_pending":
+            return {"sampleId": manifest["sampleId"], "rendered": 0}
+        if manifest.get("batchStatus") != "sealed":
+            raise ValueError("sample requires a sealed batch")
+        manifest["sampleId"] = manifest.get("sampleId") or _representative_sample(manifest["items"])
+        _atomic_json(manifest_path, manifest)
+        result = _render_items(
+            manifest=manifest, manifest_path=manifest_path, workspace=workspace,
+            model_dir=model_dir, index_python=index_python,
+            item_ids=[manifest["sampleId"]], jobs=jobs,
+        )
+        if result["failures"]:
+            raise RuntimeError(f"sample failed: {result['failures'][0]}")
+        manifest["batchStatus"] = "sample_pending"
+        manifest["sampleRenderedAt"] = datetime.now().astimezone().isoformat()
+        _atomic_json(manifest_path, manifest)
+        return {"sampleId": manifest["sampleId"], "rendered": result["rendered"]}
+
+
+def approve_sample(*, manifest_path):
+    manifest_path = Path(manifest_path).resolve()
+    with _batch_lock(manifest_path.parent):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("batchStatus") in {"sample_approved", "rendering", "complete"}:
+            return manifest
+        sample = next((item for item in manifest.get("items", []) if item["id"] == manifest.get("sampleId")), None)
+        if manifest.get("mode") != "batch" or manifest.get("batchStatus") != "sample_pending" \
+                or not sample or sample.get("status") != "verified":
+            raise ValueError("a verified sample is required before approval")
+        output = Path(sample.get("outputPath", ""))
+        if not output.is_absolute():
+            output = Path(manifest.get("outputDir", "")) / output
+        output = _inside(manifest["outputDir"], output, "sample output")
+        workspace = manifest_path.parents[3] if len(manifest_path.parents) > 3 else manifest_path.parent
+        production = workspace / "work/production" / sample["id"] / "manifest.json"
+        if (not output.is_file() or output.is_symlink()
+                or not production.is_file() or production.is_symlink()):
+            raise ValueError("a verified sample is required before approval")
+        manifest["batchStatus"] = "sample_approved"
+        manifest["sampleApprovedAt"] = datetime.now().astimezone().isoformat()
+        _atomic_json(manifest_path, manifest)
+        return manifest
+
+
+def reject_sample(*, manifest_path, workspace, reason):
+    workspace = Path(workspace).resolve()
+    manifest_path = _inside(workspace, manifest_path, "manifest")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("archive reason must be non-empty")
+    with _batch_lock(manifest_path.parent):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("batchStatus") not in ARCHIVABLE_BATCH_STATES:
+            raise ValueError("only a non-rendering unfinished batch can be rejected")
+        sample = next((item for item in manifest.get("items", []) if item["id"] == manifest.get("sampleId")), None)
+        rejected_dir = manifest_path.parent / "rejected-sample"
+        rejected_dir.mkdir(parents=True, exist_ok=True)
+        if sample and sample.get("outputPath"):
+            output = Path(sample["outputPath"])
+            if not output.is_absolute():
+                output = Path(manifest["outputDir"]) / output
+            output = _inside(manifest["outputDir"], output, "sample output")
+            if output.exists():
+                rejected = rejected_dir / output.name
+                shutil.move(str(output), rejected)
+                sample["archivedOutputPath"] = str(rejected)
+                sample.pop("outputPath", None)
+        if sample:
+            production = workspace / "work/production" / sample["id"]
+            if production.exists():
+                shutil.move(str(production), rejected_dir / "work-production")
+        _atomic_json(manifest_path, manifest)
+    return archive_batch(workspace, manifest_path, reason)
+
+
+def render_batch(*, manifest_path, workspace, model_dir, index_python, jobs=1, out_dir=None,
+                 limit=None, item_id=None, device="mps"):
+    workspace = Path(workspace).resolve()
+    manifest_path = _inside(workspace, manifest_path, "manifest")
+    batch_dir = manifest_path.parent
+    with _batch_lock(batch_dir):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        status = manifest.get("batchStatus")
+        target_count = manifest.get("targetCount", len(manifest.get("items", [])))
+        mode = manifest.get("mode")
+        if out_dir is not None:
+            manifest["outputDir"] = str(_inside(workspace, out_dir, "out-dir"))
+        elif manifest.get("outputDir"):
+            manifest["outputDir"] = str(_inside(workspace, manifest["outputDir"], "out-dir"))
+        elif status == "complete":
+            return {"selected": target_count, "rendered": 0, "verified": target_count, "outDir": ""}
+        else:
+            raise ValueError("manifest outputDir is required")
+        if status == "complete":
+            output_dir = Path(manifest["outputDir"])
+            complete = len(manifest.get("items", [])) == target_count and all(
+                item.get("status") == "verified"
+                and (output_dir / f"{item['id']}.mp4").is_file()
+                and not (output_dir / f"{item['id']}.mp4").is_symlink()
+                and (workspace / "work/production" / item["id"] / "manifest.json").is_file()
+                and not (workspace / "work/production" / item["id"] / "manifest.json").is_symlink()
+                for item in manifest.get("items", [])
+            )
+            if complete:
+                return {"selected": target_count, "rendered": 0, "verified": target_count,
+                        "outDir": manifest["outputDir"]}
+            status = "rendering"
+        if mode == "single":
+            allowed = {"sealed", "rendering"}
+        elif mode == "batch":
+            allowed = {"sample_approved", "rendering"}
+        else:
+            allowed = {None, "rendering", "sealed"}
+        if status not in allowed:
+            raise ValueError("batch sample approval is required before render")
+        selected_items = [item for item in manifest["items"] if not item_id or item["id"] == item_id]
+        selected_items = selected_items[:limit] if limit else selected_items
+        if not selected_items:
+            raise ValueError("batch contains no selected plans")
+        if mode:
+            manifest["batchStatus"] = "rendering"
+        if mode is None and status is None and out_dir is not None:
+            pending_items = [
+                item for item in selected_items
+                if not ((Path(manifest["outputDir"]) / f"{item['id']}.mp4").is_file()
+                        and (workspace / "work/production" / item["id"] / "manifest.json").is_file())
+            ]
+            if pending_items:
+                plans = [json.loads(_inside(workspace, batch_dir / item["planPath"], "plan").read_text(encoding="utf-8"))
+                         for item in pending_items]
+                voice = plans[0]["voice"]
+                if any(plan["voice"] != voice for plan in plans):
+                    raise ValueError("one render batch must use one voice contract")
+                unique_tasks = list({
+                    (sentence["ttsText"], voice["durationFactor"]): {
+                        "text": sentence["ttsText"], "duration_factor": voice["durationFactor"]
+                    }
+                    for plan in plans for sentence in plan["sentences"]
+                }.values())
+                prewarm = batch_dir / "tts-prewarm.jsonl"
+                _atomic_text(prewarm, "".join(json.dumps(task, ensure_ascii=False) + "\n" for task in unique_tasks))
+                cache_dir = workspace / "work/indextts25/cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                subprocess.run([
+                    str(index_python), str(workspace / "scripts/indextts25-batch.py"), "--batch-file", str(prewarm),
+                    "--voice", str(_inside(workspace, workspace / voice["promptPath"], "voice")),
+                    "--model-dir", str(model_dir), "--output-dir", str(cache_dir),
+                    "--expected-count", str(len(unique_tasks)), "--output-prefix", "sentence",
+                    "--manifest", str(batch_dir / "tts-prewarm-manifest.json"), "--device", device,
+                ], cwd=workspace, check=True)
+        _atomic_json(manifest_path, manifest)
+        result = _render_items(
+            manifest=manifest, manifest_path=manifest_path, workspace=workspace,
+            model_dir=model_dir, index_python=index_python,
+            item_ids=[item["id"] for item in selected_items], jobs=jobs,
+        )
+        verified = sum(item.get("status") == "verified" for item in manifest["items"])
+        if mode and verified == target_count:
+            manifest["batchStatus"] = "complete"
+            manifest["completedAt"] = datetime.now().astimezone().isoformat()
+        _atomic_json(manifest_path, manifest)
+        if result["failures"]:
+            raise RuntimeError(f"{len(result['failures'])} render(s) failed: {', '.join(result['failures'][:10])}")
+        return {"selected": len(selected_items), "rendered": result["rendered"], "verified": verified,
+                "outDir": manifest["outputDir"]}
 
 
 def parse_args(argv=None):

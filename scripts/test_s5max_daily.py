@@ -62,7 +62,138 @@ def write_wav(path: Path, seconds=1.0):
         output.writeframes(b"\0\0" * frames)
 
 
+def make_prepared_manifest(root, mode="batch", count=4):
+    batch_dir = root / "work/production-batches/test-batch"
+    plans = batch_dir / "plans"
+    plans.mkdir(parents=True)
+    items = []
+    for index in range(count):
+        video_id = f"s5max-test-{index + 1:03d}"
+        plan_path = plans / f"{video_id}.json"
+        plan_path.write_text(json.dumps({"id": video_id}), encoding="utf-8")
+        items.append({
+            "id": video_id, "planPath": str(plan_path.relative_to(batch_dir)),
+            "sellingPointCount": 2 + index % 3, "copySignature": f"copy-{index}",
+            "textSignature": f"text-{index}", "visualSignature": f"visual-{index}",
+            "plannedDurationSeconds": 12 + index, "status": "voiced",
+        })
+    manifest = batch_dir / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schemaVersion": 2, "batchId": "test-batch", "mode": mode,
+        "batchStatus": "sealed", "targetCount": count,
+        "outputDir": str(root / "out/production-batches/test-batch"), "items": items,
+    }), encoding="utf-8")
+    return manifest
+
+
 class DailyPlanTest(unittest.TestCase):
+    def test_complete_state_resumes_when_verified_files_are_missing(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = make_prepared_manifest(root, mode="single", count=1)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["batchStatus"] = "complete"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            calls = []
+
+            def fake_producer(*, item, out_dir, workspace, **_kwargs):
+                calls.append(item["id"])
+                output = Path(out_dir) / f"{item['id']}.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"verified")
+                production = Path(workspace) / "work/production" / item["id"]
+                production.mkdir(parents=True, exist_ok=True)
+                (production / "manifest.json").write_text("{}", encoding="utf-8")
+                return str(output)
+
+            with patch.object(module, "_run_producer", side_effect=fake_producer):
+                result = module.render_batch(
+                    manifest_path=manifest_path, workspace=root, model_dir=root / "model",
+                    index_python=root / "python", jobs=1,
+                )
+
+        self.assertEqual(calls, ["s5max-test-001"])
+        self.assertEqual(result["rendered"], 1)
+
+    def test_approval_requires_a_persisted_sample_output(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = make_prepared_manifest(root, mode="batch", count=1)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["batchStatus"] = "sample_pending"
+            manifest["sampleId"] = manifest["items"][0]["id"]
+            manifest["items"][0]["status"] = "verified"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "verified sample"):
+                module.approve_sample(manifest_path=manifest_path)
+
+    def test_batch_requires_one_sample_and_rejection_archives_whole_batch(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = make_prepared_manifest(root, mode="batch", count=4)
+            calls = []
+
+            def fake_producer(*, item, out_dir, workspace, **_kwargs):
+                calls.append(item["id"])
+                output = Path(out_dir) / f"{item['id']}.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"verified")
+                production = Path(workspace) / "work/production" / item["id"]
+                production.mkdir(parents=True, exist_ok=True)
+                (production / "manifest.json").write_text("{}", encoding="utf-8")
+                return str(output)
+
+            runtime = {"model_dir": root / "model", "index_python": root / "python"}
+            with patch.object(module, "_run_producer", side_effect=fake_producer):
+                sample = module.render_sample(manifest_path=manifest_path, workspace=root, jobs=1, **runtime)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(manifest["batchStatus"], "sample_pending")
+            self.assertEqual(sample["sampleId"], manifest["sampleId"])
+            with self.assertRaisesRegex(ValueError, "approval"):
+                module.render_batch(manifest_path=manifest_path, workspace=root, jobs=2, **runtime)
+
+            module.reject_sample(manifest_path=manifest_path, workspace=root, reason="镜头不匹配")
+            archived = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(archived["batchStatus"], "archived")
+            self.assertEqual(module.history_signatures(root), {"copy": set(), "text": set(), "visual": set()})
+
+    def test_approved_sample_counts_toward_target_and_resume_is_zero_work(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = make_prepared_manifest(root, mode="batch", count=4)
+            calls = []
+
+            def fake_producer(*, item, out_dir, workspace, **_kwargs):
+                calls.append(item["id"])
+                output = Path(out_dir) / f"{item['id']}.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"verified")
+                production = Path(workspace) / "work/production" / item["id"]
+                production.mkdir(parents=True, exist_ok=True)
+                (production / "manifest.json").write_text("{}", encoding="utf-8")
+                return str(output)
+
+            runtime = {"model_dir": root / "model", "index_python": root / "python"}
+            with patch.object(module, "_run_producer", side_effect=fake_producer):
+                module.render_sample(manifest_path=manifest_path, workspace=root, jobs=1, **runtime)
+                module.approve_sample(manifest_path=manifest_path)
+                module.render_batch(manifest_path=manifest_path, workspace=root, jobs=2, **runtime)
+                self.assertEqual(len(calls), 4)
+                calls.clear()
+                result = module.render_batch(manifest_path=manifest_path, workspace=root, jobs=2, **runtime)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(result["rendered"], 0)
+        self.assertEqual(manifest["batchStatus"], "complete")
+        self.assertTrue(all(item["status"] == "verified" for item in manifest["items"]))
+
     def test_builds_reproducible_balanced_unique_300(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
