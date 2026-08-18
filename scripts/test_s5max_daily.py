@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+import wave
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
@@ -52,6 +53,14 @@ def fixture(root: Path):
     return csv_path, assets_path
 
 
+def write_wav(path: Path, seconds=1.0):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = int(22050 * seconds)
+    with wave.open(str(path), "wb") as output:
+        output.setparams((1, 2, 22050, frames, "NONE", "not compressed"))
+        output.writeframes(b"\0\0" * frames)
+
+
 class DailyPlanTest(unittest.TestCase):
     def test_builds_reproducible_balanced_unique_300(self):
         module = load_module()
@@ -83,6 +92,70 @@ class DailyPlanTest(unittest.TestCase):
             self.assertEqual(len(fingerprints), len(set(fingerprints)))
             self.assertNotEqual(asset_ids[0], previous_hook)
             previous_hook = asset_ids[0]
+
+    def test_capacity_stops_after_proving_target_and_prepare_uses_real_wav_duration(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path, assets_path = fixture(root)
+            materials = json.loads(assets_path.read_text(encoding="utf-8"))
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"assets": [
+                {"id": clip["assetId"], "durationInSeconds": clip["sourceOutSeconds"]}
+                for clip in materials["selection"]["clipLibrary"]
+            ]}), encoding="utf-8")
+            source = root / "source-copy.txt"
+            source.write_text("测试原始文案。", encoding="utf-8")
+            voice = root / "voice.wav"
+            write_wav(voice, seconds=1.0)
+            model = root / "model"
+            model.mkdir()
+            (model / "config.yaml").write_text("model: test\n", encoding="utf-8")
+            python = root / "python"
+            python.write_text("python", encoding="utf-8")
+
+            report = module.capacity_report(
+                workspace=root, batch_id="capacity-a", seed="seed-a", copy_csv=csv_path,
+                materials_path=assets_path, catalog_path=str(catalog), voice_path=str(voice),
+                target_count=300, forbidden={"copy": set(), "text": set(), "visual": set()},
+            )
+
+            calls = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                manifest_path = Path(command[command.index("--manifest") + 1])
+                batch_file = Path(command[command.index("--batch-file") + 1])
+                items = []
+                for line, task in enumerate(map(json.loads, batch_file.read_text(encoding="utf-8").splitlines()), 1):
+                    wav_path = root / "work/indextts25/cache" / f"sentence-{line}.wav"
+                    write_wav(wav_path, seconds=5.5)
+                    items.append({"line": line, "text": task["text"], "outputPath": str(wav_path),
+                                  "durationFactor": 1, "contentKey": f"{line:064x}",
+                                  "sha256": module._sha_file(wav_path)})
+                manifest_path.write_text(json.dumps({
+                    "engine": "IndexTTS-2.5", "engineVersion": "v2.5.0",
+                    "voiceSha256": module._sha_file(voice),
+                    "modelConfigSha256": module._sha_file(model / "config.yaml"),
+                    "items": items,
+                }), encoding="utf-8")
+
+            with patch.object(module.subprocess, "run", side_effect=fake_run):
+                manifest_path = module.prepare_batch(
+                    workspace=root, mode="batch", source_copy=source, copy_csv=csv_path,
+                    materials_path=assets_path, catalog_path=catalog, voice_path=voice,
+                    model_dir=model, index_python=python, target_count=4, batch_id="prepare-a",
+                    seed="seed-a", device="cpu",
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["capacityAtLeast"], 300)
+        self.assertGreater(report["estimatedElapsedMinutes"][0], 0)
+        self.assertGreater(report["estimatedDiskGiB"], 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(manifest["batchStatus"], "sealed")
+        self.assertTrue(all(slot["sourceOutSeconds"] - slot["sourceInSeconds"] >= 5.5
+                            for item in manifest["items"] for slot in item["visualSlots"]))
 
     def test_rejects_bad_copy_pool_before_planning(self):
         module = load_module()
@@ -389,7 +462,11 @@ class DailyPlanTest(unittest.TestCase):
             active = tuple(category for category in module.SELLING if pools.get(category))
             _, first_candidate = next(module._iter_exhaustive_copy_candidates(pools, active, "joint-seed"))
             impossible = first_candidate[1]
-            audio_durations = {module._tts_text(impossible["normalizedText"]): 99}
+            audio_durations = {
+                module._tts_text(sentence["normalizedText"]): 1
+                for sentences in pools.values() for sentence in sentences
+            }
+            audio_durations[module._tts_text(impossible["normalizedText"])] = 99
             with patch.object(module, "FAST_ATTEMPTS", 0):
                 batch = module.plan_batch(
                     batch_id="joint", seed="joint-seed", copy_csv=csv_path, materials_path=assets_path,

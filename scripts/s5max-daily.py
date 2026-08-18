@@ -12,9 +12,11 @@ import os
 import random
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import unicodedata
+import wave
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -175,6 +177,20 @@ def _estimated_voice_seconds(value):
     return max(1.5, spoken / 3.5 + 0.5)
 
 
+def _required_voice_seconds(value, audio_durations):
+    return (audio_durations[_tts_text(value)] if audio_durations is not None
+            else _estimated_voice_seconds(value))
+
+
+def _validate_audio_durations(items, audio_durations):
+    if audio_durations is None:
+        return
+    required = {_tts_text(text) for item in items for text in item["subtitleTexts"]}
+    missing = sorted(required - set(audio_durations))
+    if missing:
+        raise ValueError(f"audio durations are missing {len(missing)} sentence(s): {missing[0]}")
+
+
 class CapacityError(ValueError):
     def __init__(self, exact, missing):
         self.exact = exact
@@ -315,8 +331,7 @@ def _iter_exhaustive_copy_candidates(pools, active, seed):
 def _exhaustive_visual_candidates(item, visual_pools, seed, audio_durations):
     choices = []
     for slot, (category, text) in enumerate(zip(item["categories"], item["subtitleTexts"])):
-        required = (audio_durations.get(_tts_text(text), _estimated_voice_seconds(text))
-                    if audio_durations is not None else _estimated_voice_seconds(text))
+        required = _required_voice_seconds(text, audio_durations)
         eligible = [clip for clip in visual_pools[category]
                     if clip["sourceOutSeconds"] - clip["sourceInSeconds"] >= required]
         choices.append(_seeded(eligible, seed, "all-visual", slot, key=_clip_id))
@@ -350,8 +365,7 @@ def _copy_item(*, index, batch_id, selling_count, categories, selected_sentences
 def _material_missing(item, visual_pools, audio_durations):
     missing = []
     for slot, (category, text) in enumerate(zip(item["categories"], item["subtitleTexts"])):
-        required = (audio_durations.get(_tts_text(text), _estimated_voice_seconds(text))
-                    if audio_durations is not None else _estimated_voice_seconds(text))
+        required = _required_voice_seconds(text, audio_durations)
         if not any(clip["sourceOutSeconds"] - clip["sourceInSeconds"] >= required
                    for clip in visual_pools[category]):
             source_id = item["sourceSentenceIds"][slot]
@@ -365,7 +379,7 @@ def _material_missing(item, visual_pools, audio_durations):
     return missing
 
 
-def _attach_visual(item, selected, visual_signature, catalog_path, voice_path):
+def _attach_visual(item, selected, visual_signature, catalog_path, voice_path, audio_durations=None):
     slots = [{
         "category": category, "assetId": clip["assetId"], "clipId": _clip_id(clip),
         "quickFingerprint": clip["quickFingerprint"],
@@ -373,6 +387,9 @@ def _attach_visual(item, selected, visual_signature, catalog_path, voice_path):
     } for category, clip in zip(item["categories"], selected)]
     item["visualSlots"] = slots
     item["visualSignature"] = visual_signature
+    if audio_durations is not None:
+        durations = [_required_voice_seconds(text, audio_durations) for text in item["subtitleTexts"]]
+        item["plannedDurationSeconds"] = sum(durations) + max(0, len(durations) - 1) * 5 / 30
     item["plan"] = {
         "schemaVersion": 1, "id": item["id"], "title": item["title"],
         "sourceText": "".join(item["subtitleTexts"]), "catalogPath": str(catalog_path),
@@ -489,6 +506,7 @@ def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, cat
                 continue
             item = _copy_item(index=0, batch_id=batch_id, selling_count=selling_count,
                               categories=("hook", *categories, "cta"), selected_sentences=candidate)
+            _validate_audio_durations([item], audio_durations)
             narrative_key = (item["copySignature"], item["textSignature"])
             if (narrative_key in seen_narratives or item["copySignature"] in forbidden["copy"]
                     or item["textSignature"] in forbidden["text"]):
@@ -544,7 +562,7 @@ def _plan_joint_fallback(*, batch_id, seed, pools, visual_pools, input_hash, cat
         visual_signature, visual_candidate, _ = next(edge for edge in narrative_edges[node] if edge[2][2] == 0)
         item["id"] = f"{PRODUCT_SKU}-{batch_id}-{index + 1:03d}"
         item["title"] = f"S5Max {batch_id} 每日组合 {index + 1:03d}"
-        _attach_visual(item, visual_candidate, visual_signature, catalog_path, voice_path)
+        _attach_visual(item, visual_candidate, visual_signature, catalog_path, voice_path, audio_durations)
         sentence_usage.update(item["sourceSentenceIds"])
         asset_usage.update(_clip_id(clip) for clip in visual_candidate)
         items.append(item)
@@ -647,6 +665,8 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
         sentence_usage.update(item["sentenceId"] for item in selected_sentences)
         items.append(candidate_item)
 
+    _validate_audio_durations(items, audio_durations)
+
     asset_usage, visual_signatures = Counter(), set()
     previous_hook = None
     for index, item in enumerate(items):
@@ -665,10 +685,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
                 excluded_ids = set(used_ids)
                 if slot == 0 and previous_hook and len(visual_pools[category]) > 1:
                     excluded_ids.add(previous_hook)
-                required_seconds = (audio_durations.get(_tts_text(item["subtitleTexts"][slot]),
-                                                         _estimated_voice_seconds(item["subtitleTexts"][slot]))
-                                    if audio_durations is not None else
-                                    _estimated_voice_seconds(item["subtitleTexts"][slot]))
+                required_seconds = _required_voice_seconds(item["subtitleTexts"][slot], audio_durations)
                 long_enough = [clip for clip in visual_pools[category]
                                if clip["sourceOutSeconds"] - clip["sourceInSeconds"] >= required_seconds]
                 if not long_enough:
@@ -708,7 +725,7 @@ def plan_batch(*, batch_id, seed, copy_csv, materials_path, catalog_path, voice_
         visual_signatures.add(visual_signature)
         asset_usage.update(_clip_id(clip) for clip in selected)
         previous_hook = _clip_id(selected[0])
-        _attach_visual(item, selected, visual_signature, catalog_path, voice_path)
+        _attach_visual(item, selected, visual_signature, catalog_path, voice_path, audio_durations)
 
     return {
         "schemaVersion": 2, "batchId": batch_id, "productSku": PRODUCT_SKU, "inputHash": input_hash,
@@ -729,6 +746,129 @@ def _atomic_text(path, value):
 
 def _atomic_json(path, value):
     _atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def _sha_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _wav_seconds(path):
+    try:
+        with wave.open(str(path), "rb") as audio:
+            frames = audio.getnframes()
+            rate = audio.getframerate()
+            expected = frames * audio.getnchannels() * audio.getsampwidth()
+            actual = len(audio.readframes(frames))
+    except (EOFError, OSError, ValueError, wave.Error) as error:
+        raise ValueError(f"invalid prewarmed WAV: {path}") from error
+    if frames <= 0 or rate <= 0 or actual != expected:
+        raise ValueError(f"invalid prewarmed WAV: {path}")
+    return frames / rate
+
+
+def _snapshot_once(path, value):
+    path = Path(path)
+    if path.exists() and path.read_text(encoding="utf-8") != value:
+        raise ValueError(f"batch snapshot already differs: {path}")
+    if not path.exists():
+        _atomic_text(path, value)
+
+
+def _prewarm_durations(manifest_path, texts, voice_path, model_dir, cache_dir):
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if (manifest.get("engine"), manifest.get("engineVersion")) != ("IndexTTS-2.5", "v2.5.0"):
+        raise ValueError("prewarm manifest must be local IndexTTS 2.5")
+    if manifest.get("voiceSha256") != _sha_file(voice_path):
+        raise ValueError("prewarm voice hash mismatch")
+    if manifest.get("modelConfigSha256") != _sha_file(Path(model_dir) / "config.yaml"):
+        raise ValueError("prewarm model config hash mismatch")
+    items = manifest.get("items", [])
+    if [item.get("text") for item in items] != texts:
+        raise ValueError("prewarm sentence mapping mismatch")
+    durations = {}
+    for item in items:
+        raw_output = Path(item["outputPath"])
+        output = raw_output if raw_output.is_absolute() else Path(cache_dir) / raw_output
+        output = _inside(cache_dir, output, "prewarm WAV")
+        if not re.fullmatch(r"[a-f0-9]{64}", item.get("contentKey", "")):
+            raise ValueError("prewarm WAV hash mismatch")
+        if item.get("sha256") != _sha_file(output):
+            raise ValueError("prewarm WAV hash mismatch")
+        durations[item["text"]] = _wav_seconds(output)
+    return durations
+
+
+def _resource_estimate(workspace, target_count, jobs, batch=None, catalog_path=None):
+    root = Path(workspace)
+    manifests = [json.loads(path.read_text(encoding="utf-8"))
+                 for path in root.glob("work/production-batches/*/manifest.json")]
+    elapsed = []
+    for manifest in manifests:
+        for item in manifest.get("items", []):
+            if item.get("renderStartedAt") and item.get("verifiedAt"):
+                start = datetime.fromisoformat(item["renderStartedAt"])
+                end = datetime.fromisoformat(item["verifiedAt"])
+                elapsed.append((end - start).total_seconds())
+    sizes = [path.stat().st_size for path in root.glob("out/**/*.mp4") if path.is_file()]
+    seconds_per_video = statistics.median(elapsed) if elapsed else 180
+    bytes_per_video = statistics.median(sizes) if sizes else 50 * 1024 * 1024
+    render_minutes = target_count * seconds_per_video / max(1, jobs) / 60
+    sentence_count = len({sentence["ttsText"] for item in (batch or {}).get("items", [])
+                          for sentence in item["plan"]["sentences"]}) or target_count * 5
+    selected_assets = {slot["assetId"] for item in (batch or {}).get("items", [])
+                       for slot in item["visualSlots"]}
+    catalog = Path(catalog_path) if catalog_path else None
+    if catalog is not None and not catalog.is_absolute():
+        catalog = root / catalog
+    assets = ({asset.get("id"): asset for asset in json.loads(catalog.read_text(encoding="utf-8")).get("assets", [])}
+              if catalog and catalog.is_file() else {})
+    missing_proxies = 0
+    for asset_id in selected_assets:
+        asset = assets.get(asset_id)
+        if not asset:
+            continue
+        proxy_path = asset.get("proxyPath")
+        if proxy_path:
+            proxy = Path(proxy_path)
+            if not proxy.is_absolute():
+                proxy = root / proxy
+        if not proxy_path or not proxy.is_file():
+            missing_proxies += 1
+    tts_minutes = [round(sentence_count * 0.1, 1), round(sentence_count * 0.25, 1)]
+    proxy_minutes = [round(missing_proxies * 0.25, 1), round(missing_proxies * 1.0, 1)]
+    render_range = [round(render_minutes * 0.8, 1), round(render_minutes * 1.25, 1)]
+    return {
+        "estimatedTtsMinutes": tts_minutes,
+        "estimatedProxyMinutes": proxy_minutes,
+        "estimatedRenderMinutes": render_range,
+        "estimatedElapsedMinutes": [round(tts_minutes[0] + proxy_minutes[0] + render_range[0], 1),
+                                    round(tts_minutes[1] + proxy_minutes[1] + render_range[1], 1)],
+        "estimatedDiskGiB": round(target_count * bytes_per_video * 1.25 / 1024 ** 3, 2),
+        "estimateBasis": {"uniqueSentences": sentence_count, "missingProxies": missing_proxies,
+                          "secondsPerVideo": seconds_per_video, "bytesPerVideo": bytes_per_video,
+                          "jobs": max(1, jobs)},
+    }
+
+
+def capacity_report(*, workspace, target_count, jobs=2, **plan_options):
+    try:
+        batch = plan_batch(count=target_count, **plan_options)
+        _validate_catalog(batch, plan_options["catalog_path"])
+    except CapacityError as error:
+        estimate = _resource_estimate(workspace, target_count, jobs)
+        return {**estimate, "targetCount": target_count, "canProduce": False,
+                "capacityExact": error.exact, "missing": error.missing}
+    except (OSError, ValueError) as error:
+        estimate = _resource_estimate(workspace, target_count, jobs)
+        return {**estimate, "targetCount": target_count, "canProduce": False,
+                "capacityExact": 0, "missing": [{"kind": "input", "message": str(error)}]}
+    estimate = _resource_estimate(workspace, target_count, jobs, batch, plan_options["catalog_path"])
+    return {**estimate, "targetCount": target_count, "canProduce": True,
+            "capacityAtLeast": target_count, "missing": []}
 
 
 def reserve_batch(workspace, manifest_path):
@@ -774,7 +914,8 @@ def archive_batch(workspace, manifest_path, reason):
     return manifest
 
 
-def write_batch(batch, batch_dir, copy_csv):
+def write_batch(batch, batch_dir, copy_csv, *, mode=None, source_copy_path=None,
+                materials_path=None, output_dir=None):
     batch_dir = Path(batch_dir)
     plans_dir = batch_dir / "plans"
     plans_dir.mkdir(parents=True, exist_ok=True)
@@ -793,14 +934,33 @@ def write_batch(batch, batch_dir, copy_csv):
         manifest_items.append({
             "id": item["id"], "planPath": plan_name, "copySignature": item["copySignature"],
             "textSignature": item["textSignature"], "visualSignature": item["visualSignature"],
-            "status": old.get("status", "planned"), **({"outputPath": old["outputPath"]} if old.get("outputPath") else {}),
+            "sellingPointCount": item["sellingPointCount"],
+            "visualSlots": item["visualSlots"],
+            **({"plannedDurationSeconds": item["plannedDurationSeconds"]}
+               if "plannedDurationSeconds" in item else {}),
+            "status": old.get("status", "voiced" if mode else "planned"),
+            **({"outputPath": old["outputPath"]} if old.get("outputPath") else {}),
             **({"error": old["error"]} if old.get("error") else {}),
         })
     header = {key: batch[key] for key in ("schemaVersion", "batchId", "productSku", "inputHash", "seed", "targetCount", "sellingPointDistribution")}
-    _atomic_text(batch_dir / "copy-pool.csv", Path(copy_csv).read_text(encoding="utf-8-sig"))
+    copy_pool_path = batch_dir / "copy-pool.csv"
+    _snapshot_once(copy_pool_path, Path(copy_csv).read_text(encoding="utf-8-sig"))
     _atomic_json(batch_dir / "scripts.json", {**header, "items": scripts})
     _atomic_json(batch_dir / "material-matrix.json", {**header, "items": matrix})
-    _atomic_json(manifest_path, {**header, "items": manifest_items})
+    manifest = {**header, "items": manifest_items}
+    if mode is not None:
+        first_plan = batch["items"][0].get("plan", {}) if batch.get("items") else {}
+        manifest.update({
+            "mode": mode,
+            "batchStatus": "audio_ready",
+            "sourceCopyPath": str(source_copy_path) if source_copy_path is not None else str(batch_dir / "source-copy.txt"),
+            "copyPoolPath": str(copy_pool_path),
+            "materialsPath": str(materials_path) if materials_path is not None else "",
+            "catalogPath": first_plan.get("catalogPath", ""),
+            "voice": first_plan.get("voice", {}),
+            "outputDir": str(output_dir) if output_dir is not None else str(batch_dir),
+        })
+    _atomic_json(manifest_path, manifest)
     return manifest_path
 
 
@@ -823,6 +983,74 @@ def _validate_catalog(batch, catalog_path):
                 raise ValueError(f"catalog is missing selected asset {slot['assetId']}")
             if slot["sourceOutSeconds"] > asset.get("durationInSeconds", 0):
                 raise ValueError(f"selected range exceeds catalog asset {slot['assetId']}")
+
+
+def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, catalog_path,
+                  voice_path, model_dir, index_python, target_count, batch_id, seed, device="mps"):
+    workspace = Path(workspace).resolve()
+    if mode not in {"single", "batch"}:
+        raise ValueError("mode must be single or batch")
+    if (mode == "single") != (target_count == 1):
+        raise ValueError("single mode requires target_count 1")
+    if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id):
+        raise ValueError("batch_id must be filename-safe")
+    batch_dir = workspace / "work/production-batches" / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = batch_dir / "manifest.json"
+    if manifest_path.exists():
+        raise ValueError(f"batch is already prepared: {batch_id}")
+    _snapshot_once(batch_dir / "source-copy.txt", Path(source_copy).read_text(encoding="utf-8"))
+    _snapshot_once(batch_dir / "copy-pool.csv", Path(copy_csv).read_text(encoding="utf-8-sig"))
+
+    draft_path = batch_dir / "draft-plan.json"
+    if draft_path.exists():
+        draft = json.loads(draft_path.read_text(encoding="utf-8"))
+        if (draft.get("batchId"), draft.get("seed"), draft.get("targetCount")) != (batch_id, seed, target_count):
+            raise ValueError("existing draft does not match batch id, seed, and target count")
+        forbidden = {key: set(values) for key, values in draft["forbidden"].items()}
+        provisional = draft["provisional"]
+    else:
+        forbidden = history_signatures(workspace)
+        provisional = plan_batch(
+            batch_id=batch_id, seed=seed, copy_csv=batch_dir / "copy-pool.csv", materials_path=materials_path,
+            catalog_path=catalog_path, voice_path=voice_path, count=target_count, forbidden=forbidden,
+        )
+        _atomic_json(draft_path, {
+            "batchId": batch_id, "seed": seed, "targetCount": target_count,
+            "forbidden": {key: sorted(values) for key, values in forbidden.items()},
+            "provisional": provisional,
+        })
+
+    unique_texts = list(dict.fromkeys(
+        sentence["ttsText"] for item in provisional["items"] for sentence in item["plan"]["sentences"]
+    ))
+    prewarm_path = batch_dir / "tts-prewarm.jsonl"
+    _snapshot_once(prewarm_path, "".join(
+        json.dumps({"text": text, "duration_factor": 1}, ensure_ascii=False) + "\n" for text in unique_texts
+    ))
+    cache_dir = workspace / "work/indextts25/cache"
+    tts_manifest_path = batch_dir / "tts-prewarm-manifest.json"
+    subprocess.run([
+        str(index_python), str(workspace / "scripts/indextts25-batch.py"),
+        "--batch-file", str(prewarm_path), "--voice", str(voice_path),
+        "--model-dir", str(model_dir), "--output-dir", str(cache_dir),
+        "--expected-count", str(len(unique_texts)), "--output-prefix", "sentence",
+        "--manifest", str(tts_manifest_path), "--device", device,
+    ], cwd=workspace, check=True)
+    durations = _prewarm_durations(tts_manifest_path, unique_texts, voice_path, model_dir, cache_dir)
+    final = plan_batch(
+        batch_id=batch_id, seed=seed, copy_csv=batch_dir / "copy-pool.csv", materials_path=materials_path,
+        catalog_path=catalog_path, voice_path=voice_path, count=target_count, forbidden=forbidden,
+        audio_durations=durations,
+    )
+    _validate_catalog(final, catalog_path)
+    manifest_path = write_batch(
+        final, batch_dir, batch_dir / "copy-pool.csv", mode=mode,
+        source_copy_path=batch_dir / "source-copy.txt", materials_path=materials_path,
+        output_dir=workspace / "out/production-batches" / batch_id,
+    )
+    reserve_batch(workspace, manifest_path)
+    return manifest_path
 
 
 def render_batch(*, manifest_path, workspace, model_dir, index_python, out_dir, jobs=1, limit=None, item_id=None, device="mps"):
