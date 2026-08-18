@@ -1,7 +1,7 @@
 # 文案到 Remotion 单条/批量统一生产设计
 
 **日期：** 2026-08-18
-**状态：** 用户已确认设计，待实施计划
+**状态：** 用户已确认设计与实施计划，待执行
 **适用产品：** 上谷 S5Max
 
 ## 1. 目标
@@ -69,7 +69,7 @@ Codex 不得新增或改变数字、产品名、功能名、效果结论、价�
 
 ### 4.2 文案准备层
 
-Codex 将原始文案转换为内部句子池。分类 CSV 可以继续作为内部交换格式和测试 fixture，但不再是用户合同。
+Codex 将原始文案转换为内部句子池。现有 `category,text` CSV 继续作为内部交换格式和测试 fixture，但不再是用户合同。
 
 ### 4.3 组合与批量协调层
 
@@ -126,7 +126,8 @@ Codex 将原始文案转换为内部句子池。分类 CSV 可以继续作为内
 
 预检报告：
 
-- 最大有效唯一容量。
+- 若当前文案和素材可以满足目标数量，报告 `capacityAtLeast >= targetCount`，不为一个已满足的目标枚举数百万无须生产的组合。
+- 若无法满足目标数量，完整搜索到容量耗尽，报告精确的 `capacityExact`。
 - 默认建议数量 300。
 - 预计 TTS、代理、渲染时间和磁盘空间。
 - 阻止达到 300 的文案或素材类别缺口。
@@ -247,13 +248,15 @@ draft
 
 拒绝或取消的批次进入 `archived`。
 
+`draft` 和 `capacity_confirmed` 是昂贵阶段前的工作流阶段，不创建可预留历史的 manifest；容量预检保持只读。`prepare` 可以保存一个仅用于同 seed TTS 重试的 `draft-plan.json`，但它不占用签名。完成 TTS 预热后，首个正式 manifest 以 `audio_ready` 写入，再经原子历史预留进入 `sealed`。
+
 条目状态：
 
 ```text
-planned → voiced → rendered → verified
+planned → voiced → verified
 ```
 
-每次状态变化必须原子写入 manifest。程序退出或机器重启后从 manifest 继续，不得重新组合或覆盖已验证成片。
+`produce.mjs` 内部的渲染、QC 与正式发布保持一个原子操作；QC 前只存在诊断 partial，不对外记录容易被误认为成品的 `rendered` 状态。失败条目记录 `failedStage` 和错误。每次状态变化必须原子写入 manifest。程序退出或机器重启后从 manifest 继续，不得重新组合或覆盖已验证成片。
 
 ## 10. 失败处理
 
@@ -273,7 +276,8 @@ planned → voiced → rendered → verified
 ```text
 work/production-batches/<batchId>/
 ├── source-copy.txt
-├── copy-pool.json
+├── copy-pool.csv
+├── draft-plan.json
 ├── manifest.json
 ├── plans/
 ├── qc/
@@ -300,7 +304,7 @@ out/production-batches/<batchId>/
 
 ### 12.2 批量模式
 
-- 预检在昂贵阶段前报告容量、时间、空间和缺口。
+- 预检在昂贵阶段前报告 `capacityAtLeast` 或不足目标时的精确 `capacityExact`，并报告时间、空间和缺口。
 - 默认目标为 300，最终数量由用户确认。
 - `targetCount` 个文案签名唯一且避开历史；默认批次为 300 个。
 - `targetCount` 个画面签名唯一且避开历史；默认批次为 300 个。
