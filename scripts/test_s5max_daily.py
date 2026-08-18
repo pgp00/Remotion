@@ -264,6 +264,32 @@ class DailyPlanTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "draft"):
                 module.archive_batch(root, invalid, "not ready")
 
+    def test_archive_rejects_rendering_verified_output_and_preserves_history(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "out/production-batches/rendering/rendering-001.mp4"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"verified")
+            core = root / "work/production/rendering-001/manifest.json"
+            core.parent.mkdir(parents=True)
+            core.write_text(json.dumps({"output": {"path": str(output)}}), encoding="utf-8")
+            path = root / "work/production-batches/rendering/manifest.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "schemaVersion": 2, "batchStatus": "rendering",
+                "items": [{"id": "rendering-001", "status": "verified", "outputPath": str(output),
+                           "copySignature": "copy-rendering", "textSignature": "text-rendering",
+                           "visualSignature": "visual-rendering"}],
+            }), encoding="utf-8")
+            before = module.history_signatures(root)
+
+            with self.assertRaisesRegex(ValueError, "rendering"):
+                module.archive_batch(root, path, "cancel")
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["batchStatus"], "rendering")
+            self.assertEqual(module.history_signatures(root), before)
+
     def test_visual_signature_uses_ordered_meaningful_clip_ids_only(self):
         module = load_module()
         first = [{"clipId": "face-shave", "sourceInSeconds": 0.0},

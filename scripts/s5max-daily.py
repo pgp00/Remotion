@@ -31,7 +31,7 @@ TEMPLATES = (
     ("appearance", "scene", "blade", "power", "shave", "water", "charge"),
 )
 LIVE_BATCH_STATES = {"sealed", "sample_pending", "sample_approved", "rendering"}
-ARCHIVABLE_BATCH_STATES = {"audio_ready", *LIVE_BATCH_STATES}
+ARCHIVABLE_BATCH_STATES = {"audio_ready", "sealed", "sample_pending", "sample_approved"}
 
 
 def _sha(value):
