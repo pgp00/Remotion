@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import statistics
 import subprocess
@@ -24,6 +25,11 @@ from pathlib import Path
 
 
 PRODUCT_SKU = "s5max"
+DEFAULT_MATERIALS = Path("work/s5max-30-unique/smb-expanded-materials.json")
+DEFAULT_CATALOG = Path("work/asset-library/catalog.json")
+DEFAULT_VOICE = Path("work/indextts2-s5max/voice_03.wav")
+DEFAULT_MODEL = Path("work/indextts25/index-tts/checkpoints")
+DEFAULT_PYTHON = Path("work/indextts25/index-tts/.venv/bin/python")
 SELLING = ("shave", "blade", "power", "water", "charge", "appearance", "scene")
 ALLOWED = {"hook", "cta", *SELLING}
 TEMPLATES = (
@@ -1363,33 +1369,114 @@ def render_batch(*, manifest_path, workspace, model_dir, index_python, jobs=1, o
                 "outDir": manifest["outputDir"]}
 
 
+def _add_runtime(parser, *, jobs=False):
+    parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL)
+    parser.add_argument("--python", dest="index_python", type=Path, default=DEFAULT_PYTHON)
+    if jobs:
+        parser.add_argument("--jobs", type=int, default=1)
+
+
 def parse_args(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["plan"]:
+        legacy = argparse.ArgumentParser(description="Legacy S5Max batch planner")
+        legacy.add_argument("--date", required=True)
+        legacy.add_argument("--copy-csv", required=True, type=Path)
+        legacy.add_argument("--materials", type=Path, default=DEFAULT_MATERIALS)
+        legacy.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+        legacy.add_argument("--voice", type=Path, default=DEFAULT_VOICE)
+        legacy.add_argument("--work-dir", type=Path)
+        legacy.add_argument("--count", type=int, default=300)
+        parsed = legacy.parse_args(arguments[1:])
+        parsed.command = "plan"
+        return parsed
+
     parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    plan = subparsers.add_parser("plan")
-    plan.add_argument("--date", required=True)
-    plan.add_argument("--copy-csv", required=True, type=Path)
-    plan.add_argument("--materials", type=Path, default=Path("work/s5max-30-unique/smb-expanded-materials.json"))
-    plan.add_argument("--catalog", type=Path, default=Path("work/asset-library/catalog.json"))
-    plan.add_argument("--voice", default="work/indextts2-s5max/voice_03.wav")
-    plan.add_argument("--work-dir", type=Path)
-    plan.add_argument("--count", type=int, default=300)
-    render = subparsers.add_parser("render")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    capacity = commands.add_parser("capacity")
+    capacity.add_argument("--copy-csv", required=True, type=Path)
+    capacity.add_argument("--materials", type=Path, default=DEFAULT_MATERIALS)
+    capacity.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    capacity.add_argument("--voice", type=Path, default=DEFAULT_VOICE)
+    capacity.add_argument("--count", type=int, default=300)
+    capacity.add_argument("--jobs", type=int, default=2)
+    capacity.add_argument("--workspace", type=Path, default=Path.cwd())
+
+    prepare = commands.add_parser("prepare")
+    prepare.add_argument("--mode", choices=("single", "batch"), required=True)
+    prepare.add_argument("--source-copy", required=True, type=Path)
+    prepare.add_argument("--copy-csv", required=True, type=Path)
+    prepare.add_argument("--materials", type=Path, default=DEFAULT_MATERIALS)
+    prepare.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    prepare.add_argument("--voice", type=Path, default=DEFAULT_VOICE)
+    prepare.add_argument("--count", type=int)
+    prepare.add_argument("--batch-id")
+    prepare.add_argument("--seed")
+    prepare.add_argument("--device", choices=("mps", "cpu"), default="mps")
+    _add_runtime(prepare)
+
+    sample = commands.add_parser("sample")
+    sample.add_argument("--manifest", required=True, type=Path)
+    _add_runtime(sample, jobs=True)
+
+    approve = commands.add_parser("approve")
+    approve.add_argument("--manifest", required=True, type=Path)
+
+    reject = commands.add_parser("reject")
+    reject.add_argument("--manifest", required=True, type=Path)
+    reject.add_argument("--workspace", type=Path, default=Path.cwd())
+    reject.add_argument("--reason", required=True)
+
+    render = commands.add_parser("render")
     render.add_argument("--manifest", required=True, type=Path)
-    render.add_argument("--workspace", type=Path, default=Path.cwd())
-    render.add_argument("--model-dir", type=Path, default=Path("work/indextts25/index-tts/checkpoints"))
-    render.add_argument("--python", dest="index_python", type=Path, default=Path("work/indextts25/index-tts/.venv/bin/python"))
-    render.add_argument("--out-dir", type=Path)
-    render.add_argument("--jobs", type=int, default=1)
-    render.add_argument("--limit", type=int)
-    render.add_argument("--id", dest="item_id")
-    render.add_argument("--device", choices=("mps", "cpu"), default="mps")
-    return parser.parse_args(argv)
+    _add_runtime(render, jobs=True)
+    # Keep old render callers working without making those controls part of the
+    # six-command user-facing contract.
+    render.add_argument("--out-dir", type=Path, help=argparse.SUPPRESS)
+    render.add_argument("--limit", type=int, help=argparse.SUPPRESS)
+    render.add_argument("--id", dest="item_id", help=argparse.SUPPRESS)
+    render.add_argument("--device", choices=("mps", "cpu"), default="mps", help=argparse.SUPPRESS)
+
+    return parser.parse_args(arguments)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.command == "plan":
+    if args.command == "capacity":
+        workspace = args.workspace.resolve()
+        result = capacity_report(
+            workspace=workspace, target_count=args.count, jobs=args.jobs,
+            batch_id="capacity", seed=_sha(args.copy_csv.read_text(encoding="utf-8-sig")),
+            copy_csv=args.copy_csv, materials_path=args.materials, catalog_path=args.catalog,
+            voice_path=args.voice, forbidden=history_signatures(workspace),
+        )
+    elif args.command == "prepare":
+        count = args.count if args.count is not None else (1 if args.mode == "single" else 300)
+        if args.mode == "single" and count != 1:
+            raise ValueError("single mode requires count 1")
+        batch_id = args.batch_id or f"{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(4)}"
+        seed = args.seed or _sha(batch_id)
+        print(json.dumps({"batchId": batch_id, "seed": seed, "status": "preparing"}, ensure_ascii=False),
+              file=sys.stderr, flush=True)
+        manifest_path = prepare_batch(
+            workspace=args.workspace, mode=args.mode, source_copy=args.source_copy,
+            copy_csv=args.copy_csv, materials_path=args.materials, catalog_path=args.catalog,
+            voice_path=args.voice, model_dir=args.model_dir, index_python=args.index_python,
+            target_count=count, batch_id=batch_id, seed=seed, device=args.device,
+        )
+        result = {"batchId": batch_id, "seed": seed, "manifest": str(manifest_path)}
+    elif args.command == "sample":
+        result = render_sample(
+            manifest_path=args.manifest, workspace=args.workspace, model_dir=args.model_dir,
+            index_python=args.index_python, jobs=args.jobs,
+        )
+    elif args.command == "approve":
+        result = approve_sample(manifest_path=args.manifest)
+    elif args.command == "reject":
+        result = reject_sample(manifest_path=args.manifest, workspace=args.workspace, reason=args.reason)
+    elif args.command == "plan":
         if args.count != 300:
             raise ValueError("daily production count must be exactly 300")
         batch = plan_batch(batch_id=args.date, seed=args.date, copy_csv=args.copy_csv, materials_path=args.materials,
@@ -1397,14 +1484,20 @@ def main(argv=None):
         _validate_catalog(batch, args.catalog)
         batch_dir = args.work_dir or Path("work/s5max-daily") / args.date
         manifest = write_batch(batch, batch_dir, args.copy_csv)
-        print(json.dumps({"targetCount": batch["targetCount"], "inputHash": batch["inputHash"], "manifest": str(manifest)}, ensure_ascii=False))
+        result = {"targetCount": batch["targetCount"], "inputHash": batch["inputHash"], "manifest": str(manifest)}
     else:
-        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        out_dir = args.out_dir or Path("out/s5max-daily") / manifest.get("batchId", manifest.get("date", "batch"))
-        result = render_batch(manifest_path=args.manifest, workspace=args.workspace, model_dir=args.model_dir,
-                              index_python=args.index_python, out_dir=out_dir, jobs=args.jobs, limit=args.limit,
-                              item_id=args.item_id, device=args.device)
-        print(json.dumps(result, ensure_ascii=False))
+        if args.out_dir is None and args.limit is None and args.item_id is None and args.device == "mps":
+            result = render_batch(
+                manifest_path=args.manifest, workspace=args.workspace, model_dir=args.model_dir,
+                index_python=args.index_python, jobs=args.jobs,
+            )
+        else:
+            result = render_batch(
+                manifest_path=args.manifest, workspace=args.workspace, model_dir=args.model_dir,
+                index_python=args.index_python, out_dir=args.out_dir, jobs=args.jobs, limit=args.limit,
+                item_id=args.item_id, device=args.device,
+            )
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 
 
 if __name__ == "__main__":

@@ -930,6 +930,23 @@ class DailyPlanTest(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["targetCount"], 300)
 
+    def test_cli_has_one_coordinator_state_machine(self):
+        module = load_module()
+        capacity = module.parse_args(["capacity", "--copy-csv", "pool.csv", "--count", "300"])
+        prepare = module.parse_args(["prepare", "--mode", "single", "--source-copy", "copy.txt", "--copy-csv", "pool.csv"])
+        sample = module.parse_args(["sample", "--manifest", "work/production-batches/a/manifest.json"])
+        approve = module.parse_args(["approve", "--manifest", "work/production-batches/a/manifest.json"])
+        reject = module.parse_args(["reject", "--manifest", "work/production-batches/a/manifest.json", "--reason", "不匹配"])
+        render = module.parse_args(["render", "--manifest", "work/production-batches/a/manifest.json"])
+
+        self.assertEqual(capacity.command, "capacity")
+        self.assertEqual(capacity.count, 300)
+        self.assertEqual(prepare.mode, "single")
+        self.assertEqual(sample.command, "sample")
+        self.assertEqual(approve.command, "approve")
+        self.assertEqual(reject.reason, "不匹配")
+        self.assertEqual(render.command, "render")
+
     def test_render_resumes_completed_items_without_relaunching(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
