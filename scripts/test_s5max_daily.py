@@ -119,6 +119,40 @@ class DailyPlanTest(unittest.TestCase):
         self.assertEqual(manifest["batchStatus"], "complete")
         self.assertEqual(manifest["items"][0]["status"], "verified")
 
+    def test_resume_moves_output_symlink_before_reproducing(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = make_prepared_manifest(root, mode="single", count=1)
+            output = root / "out/production-batches/test-batch/s5max-test-001.mp4"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            target = output.with_name("stale-target.mp4")
+            target.write_bytes(b"stale-target")
+            output.symlink_to(target)
+            production = root / "work/production/s5max-test-001"
+            production.mkdir(parents=True, exist_ok=True)
+            (production / "manifest.json").write_text("{}", encoding="utf-8")
+            calls = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                self.assertFalse(output.exists() or output.is_symlink())
+                retries = list((manifest_path.parent / "retries").glob("s5max-test-001-*/s5max-test-001.mp4"))
+                self.assertEqual(len(retries), 1)
+                self.assertTrue(retries[0].is_symlink())
+                output.write_bytes(b"verified")
+                production.mkdir(parents=True, exist_ok=True)
+                (production / "manifest.json").write_text("{}", encoding="utf-8")
+
+            with patch.object(module.subprocess, "run", side_effect=fake_run):
+                result = module.render_batch(
+                    manifest_path=manifest_path, workspace=root, model_dir=root / "model",
+                    index_python=root / "python", jobs=1,
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["rendered"], 1)
+
     def test_complete_state_resumes_when_verified_files_are_missing(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:

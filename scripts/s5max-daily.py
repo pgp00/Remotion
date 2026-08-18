@@ -1100,7 +1100,8 @@ def _run_producer(*, item, batch_dir, workspace, model_dir, index_python, out_di
     work_dir = workspace / "work/production" / item["id"]
     partial = Path(out_dir) / f"{item['id']}.partial.mp4"
     production_manifest = work_dir / "manifest.json"
-    if output.exists() and production_manifest.is_file() and not production_manifest.is_symlink():
+    if (output.is_file() and not output.is_symlink()
+            and production_manifest.is_file() and not production_manifest.is_symlink()):
         raise ValueError(f"unverified final output already exists: {output}")
     stale = [path for path in (work_dir, partial) if path.exists()]
     if output.exists() or output.is_symlink():
