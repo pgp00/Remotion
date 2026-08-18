@@ -1095,13 +1095,16 @@ def prepare_batch(*, workspace, mode, source_copy, copy_csv, materials_path, cat
 
 def _run_producer(*, item, batch_dir, workspace, model_dir, index_python, out_dir):
     output = Path(out_dir) / f"{item['id']}.mp4"
-    if output.exists():
-        raise ValueError(f"unverified final output already exists: {output}")
     workspace = Path(workspace)
     batch_dir = Path(batch_dir)
     work_dir = workspace / "work/production" / item["id"]
     partial = Path(out_dir) / f"{item['id']}.partial.mp4"
+    production_manifest = work_dir / "manifest.json"
+    if output.exists() and production_manifest.is_file() and not production_manifest.is_symlink():
+        raise ValueError(f"unverified final output already exists: {output}")
     stale = [path for path in (work_dir, partial) if path.exists()]
+    if output.exists() or output.is_symlink():
+        stale.append(output)
     if stale:
         retry_dir = batch_dir / "retries" / f"{item['id']}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
         retry_dir.mkdir(parents=True)
