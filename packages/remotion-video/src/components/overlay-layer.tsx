@@ -1,5 +1,6 @@
 import {spring, useCurrentFrame} from "remotion";
 import type {ProductionProps} from "../production-contract.js";
+import {DOUYIN_SAFE_ZONE} from "../visual-timing.js";
 import {visualTheme} from "./visual-theme";
 
 type Sentence = ProductionProps["sentences"][number];
@@ -20,13 +21,14 @@ export const OverlayLayer = ({sentence, fps}: {sentence: Sentence; fps: number})
 
   if (sentence.visual.role === "hook") return <div style={{...base, ...motion, left: 72, right: 200, top: 180, fontSize: 96, fontWeight: 900, lineHeight: 1.05, whiteSpace: "pre-wrap"}}>{label}</div>;
   if (sentence.visual.role === "proof") {
-    const left = Math.min(820, Math.max(120, sentence.shot.focusX * 1080));
-    const top = Math.min(1220, Math.max(300, sentence.shot.focusY * 1920));
-    return <div style={{...base, ...motion, left: left - 58, top: top - 58}}>
-      <div style={{width: 116, height: 116, borderRadius: "50%", border: `4px solid ${visualTheme.result}`, boxShadow: "0 0 0 6px rgba(0,0,0,0.28)"}} />
-      <div style={{marginTop: 14, padding: "8px 14px", borderRadius: 999, background: "rgba(0,0,0,0.68)", fontSize: 38, fontWeight: 800}}>{label}</div>
+    const markerX = Math.min(1080 - DOUYIN_SAFE_ZONE.right - 58, Math.max(DOUYIN_SAFE_ZONE.left + 58, sentence.shot.focusX * 1080));
+    const markerY = Math.min(1920 - DOUYIN_SAFE_ZONE.bottom - 58, Math.max(DOUYIN_SAFE_ZONE.top + 58, sentence.shot.focusY * 1920));
+    const labelTop = Math.min(1220, Math.max(DOUYIN_SAFE_ZONE.top, markerY + 72));
+    return <div style={{...motion, position: "absolute", inset: 0}}>
+      <div style={{...base, left: markerX - 58, top: markerY - 58, width: 116, height: 116, borderRadius: "50%", border: `4px solid ${visualTheme.result}`, boxShadow: "0 0 0 6px rgba(0,0,0,0.28)"}} />
+      <div style={{...base, left: DOUYIN_SAFE_ZONE.left, right: DOUYIN_SAFE_ZONE.right, top: labelTop, maxWidth: 808, whiteSpace: "normal", overflowWrap: "anywhere", boxSizing: "border-box", padding: "8px 14px", borderRadius: 999, background: "rgba(0,0,0,0.68)", fontSize: 38, fontWeight: 800}}>{label}</div>
     </div>;
   }
-  if (sentence.visual.role === "feature") return <div style={{...base, ...motion, left: 72, top: 220, padding: "12px 22px", borderRadius: 999, background: "rgba(0,0,0,0.66)", border: "1px solid rgba(255,255,255,0.38)", fontSize: 46, fontWeight: 850}}>{label}</div>;
+  if (sentence.visual.role === "feature") return <div style={{...base, ...motion, left: DOUYIN_SAFE_ZONE.left, right: DOUYIN_SAFE_ZONE.right, top: 220, maxWidth: 808, whiteSpace: "normal", overflowWrap: "anywhere", boxSizing: "border-box", padding: "12px 22px", borderRadius: 999, background: "rgba(0,0,0,0.66)", border: "1px solid rgba(255,255,255,0.38)", fontSize: 46, fontWeight: 850}}>{label}</div>;
   return <div style={{...base, ...motion, left: 72, right: 200, bottom: 760, padding: "22px 28px", borderRadius: 24, background: "rgba(215,28,48,0.92)", fontSize: 58, fontWeight: 900, textAlign: "center"}}>{label}</div>;
 };

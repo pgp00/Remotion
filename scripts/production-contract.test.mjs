@@ -196,6 +196,15 @@ test("production composition uses the required sentence media clock", async () =
   assert.match(source, /flatMap\(captionCuesForSentence\)/);
 });
 
+test("visual overlays keep proof and feature labels inside the Douyin safe zone", async () => {
+  const source = await readFile(new URL("../packages/remotion-video/src/components/overlay-layer.tsx", import.meta.url), "utf8");
+  assert.match(source, /import \{DOUYIN_SAFE_ZONE\} from "\.\.\/visual-timing\.js"/);
+  assert.match(source, /left: DOUYIN_SAFE_ZONE\.left, right: DOUYIN_SAFE_ZONE\.right/);
+  assert.match(source, /maxWidth: 808, whiteSpace: "normal", overflowWrap: "anywhere"/);
+  assert.match(source, /DOUYIN_SAFE_ZONE\.left \+ 58/);
+  assert.match(source, /1920 - DOUYIN_SAFE_ZONE\.bottom - 58/);
+});
+
 test("production props type is owned by the shared contract", async () => {
   const source = await readFile(new URL("../packages/remotion-video/src/production-video.tsx", import.meta.url), "utf8");
   const contract = await readFile(new URL("../packages/remotion-video/src/production-contract.js", import.meta.url), "utf8");
