@@ -189,7 +189,9 @@ test("production composition uses the required sentence media clock", async () =
   assert.match(source, /validateProductionProps\(props\)/);
   assert.match(source, /<Sequence[\s\S]*from=\{sentence\.startFrame\}[\s\S]*durationInFrames=\{sentence\.voiceFrames \+ sentence\.pauseFrames\}/);
   assert.match(source, /<Freeze[\s\S]*frame=\{sentence\.voiceFrames - 1\}[\s\S]*active=\{\(frame\) => frame >= sentence\.voiceFrames\}/);
-  assert.match(source, /<OffthreadVideo[\s\S]*muted/);
+  assert.match(source, /<ShotLayer sentence=\{sentence\} fps=\{props\.fps\}/);
+  assert.match(source, /<OverlayLayer sentence=\{sentence\} fps=\{props\.fps\}/);
+  assert.doesNotMatch(source, /<OffthreadVideo/);
   assert.match(source, /<Audio[\s\S]*src=\{staticFile\(sentence\.wavPath\)\}[\s\S]*trimAfter=\{sentence\.voiceFrames\}/);
   assert.match(source, /flatMap\(captionCuesForSentence\)/);
 });

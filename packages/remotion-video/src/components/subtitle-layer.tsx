@@ -1,5 +1,6 @@
 import {useCurrentFrame} from "remotion";
 import {subtitleOpacityAt} from "../production-contract.js";
+import {visualTheme} from "./visual-theme";
 
 export type SubtitleCue = {
   id: string;
@@ -68,7 +69,7 @@ export const SubtitleLayer = ({
   }
 
   const emphasisIndex = cue.emphasis ? cue.text.indexOf(cue.emphasis) : -1;
-  const accent = cue.role === "hook" ? "#FFD84D" : "#57E389";
+  const accent = cue.role === "hook" ? visualTheme.problem : visualTheme.result;
   const content = emphasisIndex === -1 ? cue.text : <>
     {cue.text.slice(0, emphasisIndex)}
     <span style={{color: accent, display: "inline-block", transform: `scale(${1 + 0.06 * opacity})`}}>{cue.emphasis}</span>
@@ -85,7 +86,7 @@ export const SubtitleLayer = ({
         display: "flex",
         justifyContent: "center",
         opacity,
-        fontFamily: '"PingFang SC", "Microsoft YaHei", sans-serif',
+        fontFamily: visualTheme.fontFamily,
       }}
     >
       <div
@@ -94,7 +95,7 @@ export const SubtitleLayer = ({
           padding: "14px 22px 16px",
           borderRadius: 18,
           background: "linear-gradient(90deg, rgba(0,0,0,0.72), rgba(0,0,0,0.28))",
-          color: brand.text,
+          color: visualTheme.text,
           fontSize: 60,
           fontWeight: 800,
           lineHeight: 1.18,

@@ -1,7 +1,9 @@
-import {AbsoluteFill, Audio, Freeze, OffthreadVideo, Sequence, staticFile} from "remotion";
+import {AbsoluteFill, Audio, Freeze, Sequence, staticFile} from "remotion";
 import type {ProductionProps} from "./production-contract.js";
 import {SubtitleLayer, type BrandTheme, type SubtitleCue} from "./components/subtitle-layer";
-import {mediaTrimFrames} from "./media-trim";
+import {OverlayLayer} from "./components/overlay-layer";
+import {ShotLayer} from "./components/shot-layer";
+import {visualTheme} from "./components/visual-theme";
 import {validateProductionProps} from "./production-contract.js";
 import {captionCuesForSentence} from "./visual-timing.js";
 
@@ -17,7 +19,7 @@ export const ProductionVideo = (props: ProductionProps) => {
   const cues: SubtitleCue[] = props.sentences.flatMap(captionCuesForSentence);
 
   return (
-    <AbsoluteFill style={{backgroundColor: brand.primary, overflow: "hidden"}}>
+    <AbsoluteFill style={{backgroundColor: visualTheme.background, overflow: "hidden"}}>
       {props.sentences.map((sentence) => (
         <Sequence
           key={sentence.id}
@@ -25,18 +27,9 @@ export const ProductionVideo = (props: ProductionProps) => {
           durationInFrames={sentence.voiceFrames + sentence.pauseFrames}
         >
           <Freeze frame={sentence.voiceFrames - 1} active={(frame) => frame >= sentence.voiceFrames}>
-            <OffthreadVideo
-              src={staticFile(sentence.shot.proxyPath)}
-              {...mediaTrimFrames({...sentence.shot, fps: props.fps})}
-              muted
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: sentence.shot.fit,
-                objectPosition: `${sentence.shot.focusX * 100}% ${sentence.shot.focusY * 100}%`,
-              }}
-            />
+            <ShotLayer sentence={sentence} fps={props.fps} />
           </Freeze>
+          <OverlayLayer sentence={sentence} fps={props.fps} />
           <Audio src={staticFile(sentence.wavPath)} trimAfter={sentence.voiceFrames} />
         </Sequence>
       ))}
