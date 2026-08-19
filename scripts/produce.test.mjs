@@ -159,16 +159,26 @@ test("visual jobs stage only required verified design audio and record licenses"
   await writeFile(files.plan, JSON.stringify(planValue));
   const audioRoot = path.join(root, "assets/audio/s5max");
   await mkdir(audioRoot, {recursive: true});
-  await writeFile(path.join(audioRoot, "bgm.mp3"), "bgm");
-  await writeFile(path.join(audioRoot, "impact.wav"), "impact");
+  await writeFile(path.join(audioRoot, "bgm-deep-techno-ambience.mp3"), "bgm");
+  await writeFile(path.join(audioRoot, "hook-impact.wav"), "impact");
   await writeFile(path.join(audioRoot, "sources.json"), JSON.stringify({schemaVersion: 1, licenseCheckedAt: "2026-08-19", assets: [
-    {key: "bgm", fileName: "bgm.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
-    {key: "impact", fileName: "impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
+    {key: "bgm", fileName: "bgm-deep-techno-ambience.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
+    {key: "impact", fileName: "hook-impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
   ]}));
-  const {execFileImpl} = fakeCommands(root, files);
+  const {calls, execFileImpl} = fakeCommands(root, files);
   const result = await runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}, {execFileImpl});
-  assert.equal(await readFile(path.join(root, "work/production/video-01/public/audio/design/bgm.mp3"), "utf8"), "bgm");
+  assert.equal(await readFile(path.join(root, "work/production/video-01/public/audio/design/bgm-deep-techno-ambience.mp3"), "utf8"), "bgm");
   assert.deepEqual(result.designAudio.assets.map(({key}) => key), ["bgm", "impact"]);
+  const still = calls.find(([, args]) => args[0] === "still")[1];
+  const stillProps = JSON.parse(still[still.indexOf("--props") + 1]);
+  assert.deepEqual(stillProps.safeZone, {left: 72, right: 200, top: 160, bottom: 530});
+  assert.ok(stillProps.samples.some(({frame}) => frame === 9));
+});
+
+test("contact sheet seeks to the requested frame without dividing by fps", async () => {
+  const source = await readFile(new URL("../packages/remotion-video/src/contact-sheet.tsx", import.meta.url), "utf8");
+  assert.match(source, /trimBefore=\{sample\.frame\}/);
+  assert.doesNotMatch(source, /sample\.frame \/ 30/);
 });
 
 test("visual jobs reject a design audio hash mismatch before rendering", async () => {
@@ -178,11 +188,11 @@ test("visual jobs reject a design audio hash mismatch before rendering", async (
   await writeFile(files.plan, JSON.stringify(planValue));
   const audioRoot = path.join(root, "assets/audio/s5max");
   await mkdir(audioRoot, {recursive: true});
-  await writeFile(path.join(audioRoot, "bgm.mp3"), "tampered");
-  await writeFile(path.join(audioRoot, "impact.wav"), "impact");
+  await writeFile(path.join(audioRoot, "bgm-deep-techno-ambience.mp3"), "tampered");
+  await writeFile(path.join(audioRoot, "hook-impact.wav"), "impact");
   await writeFile(path.join(audioRoot, "sources.json"), JSON.stringify({schemaVersion: 1, licenseCheckedAt: "2026-08-19", assets: [
-    {key: "bgm", fileName: "bgm.mp3", sha256: sha256("expected"), sourceUrl: "https://example.test/bgm", license: "test"},
-    {key: "impact", fileName: "impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
+    {key: "bgm", fileName: "bgm-deep-techno-ambience.mp3", sha256: sha256("expected"), sourceUrl: "https://example.test/bgm", license: "test"},
+    {key: "impact", fileName: "hook-impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
   ]}));
   await assert.rejects(runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}), /design audio hash/);
 });
@@ -194,16 +204,34 @@ test("visual jobs fail before TTS when PingFang SC is unavailable", async () => 
   await writeFile(files.plan, JSON.stringify(planValue));
   const audioRoot = path.join(root, "assets/audio/s5max");
   await mkdir(audioRoot, {recursive: true});
-  for (const [name, value] of [["bgm.mp3", "bgm"], ["impact.wav", "impact"]]) await writeFile(path.join(audioRoot, name), value);
+  for (const [name, value] of [["bgm-deep-techno-ambience.mp3", "bgm"], ["hook-impact.wav", "impact"]]) await writeFile(path.join(audioRoot, name), value);
   await writeFile(path.join(audioRoot, "sources.json"), JSON.stringify({schemaVersion: 1, licenseCheckedAt: "2026-08-19", assets: [
-    {key: "bgm", fileName: "bgm.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
-    {key: "impact", fileName: "impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
+    {key: "bgm", fileName: "bgm-deep-techno-ambience.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
+    {key: "impact", fileName: "hook-impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
   ]}));
   const fake = fakeCommands(root, files);
   const execFileImpl = async (command, args) => command === "/usr/sbin/system_profiler"
     ? {stdout: JSON.stringify({SPFontsDataType: []}), stderr: ""}
     : fake.execFileImpl(command, args);
   await assert.rejects(runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}, {execFileImpl}), /PingFang SC/);
+  assert.equal(fake.calls.some(([command]) => command === files.python), false);
+});
+
+test("visual jobs reject design audio filenames that differ from SoundBed paths", async () => {
+  const {root, files} = await makeWorkspace();
+  const planValue = JSON.parse(await readFile(files.plan, "utf8"));
+  planValue.sentences[0].visual = {role: "hook", label: "先看", sfx: "impact"};
+  await writeFile(files.plan, JSON.stringify(planValue));
+  const audioRoot = path.join(root, "assets/audio/s5max");
+  await mkdir(audioRoot, {recursive: true});
+  await writeFile(path.join(audioRoot, "bgm.mp3"), "bgm");
+  await writeFile(path.join(audioRoot, "hook-impact.wav"), "impact");
+  await writeFile(path.join(audioRoot, "sources.json"), JSON.stringify({schemaVersion: 1, licenseCheckedAt: "2026-08-19", assets: [
+    {key: "bgm", fileName: "bgm.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
+    {key: "impact", fileName: "hook-impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
+  ]}));
+  const fake = fakeCommands(root, files);
+  await assert.rejects(runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}, {execFileImpl: fake.execFileImpl}), /Invalid design audio entry: bgm/);
   assert.equal(fake.calls.some(([command]) => command === files.python), false);
 });
 

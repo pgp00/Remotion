@@ -8,6 +8,8 @@ import {pathToFileURL} from "node:url";
 import {promisify} from "node:util";
 
 import {buildProductionProps, validateProductionPlan} from "../packages/remotion-video/src/production-contract.js";
+import {DESIGN_AUDIO_PATHS} from "../packages/remotion-video/src/audio-design.js";
+import {DOUYIN_SAFE_ZONE} from "../packages/remotion-video/src/visual-timing.js";
 import {assertDescendant, readJson, writeJsonAtomic} from "./lib/job.mjs";
 import {assertProxyProbeJson, isJpeg, proxyArgs} from "./lib/prepare-media.mjs";
 import {analyzeVolume, assertAudibleVolume, assertMixHeadroom, assertQcMetadata, assertSystemFont, renderArgs} from "./lib/render-qc.mjs";
@@ -207,7 +209,8 @@ export const runProduction = async (options, {execFileImpl = execFile} = {}) => 
     const staged = [];
     for (const key of requiredKeys) {
       const entry = byKey.get(key);
-      if (!entry || !/^[a-f0-9]{64}$/u.test(entry.sha256) || !JOB_RE.test(entry.key) || path.basename(entry.fileName) !== entry.fileName) throw new Error(`Invalid design audio entry: ${key}`);
+      const expectedFileName = DESIGN_AUDIO_PATHS[key] && path.basename(DESIGN_AUDIO_PATHS[key]);
+      if (!entry || !expectedFileName || entry.fileName !== expectedFileName || !/^[a-f0-9]{64}$/u.test(entry.sha256) || !JOB_RE.test(entry.key) || path.basename(entry.fileName) !== entry.fileName) throw new Error(`Invalid design audio entry: ${key}`);
       const source = await regularFile(path.join(sourceRoot, entry.fileName), `design audio ${key}`);
       assertDescendant(sourceRoot, source, `design audio ${key}`);
       if (await sha256File(source) !== entry.sha256) throw new Error(`design audio hash mismatch: ${key}`);
@@ -285,8 +288,17 @@ export const runProduction = async (options, {execFileImpl = execFile} = {}) => 
 
   if (!(await isJpeg(paths.finalCutContactPath))) {
     const temporary = path.join(paths.contactsDir, `final-cut.${randomUUID()}.partial.jpg`);
-    const samples = [{frame: 0, label: "START"}, ...props.sentences.slice(1).map((sentence) => ({frame: sentence.startFrame + 1, label: `CUT · ${sentence.id}`})), {frame: props.durationInFrames - 1, label: "END"}];
-    await execFileImpl(remotion, ["still", "src/index.ts", "MediaContactSheet", temporary, "--props", JSON.stringify({mediaPath: path.basename(paths.partialOutputPath), samples}), "--public-dir", outDir, "--image-format", "jpeg", "--jpeg-quality", "90", "--overwrite=false"], {cwd: remotionCwd(input.workspaceRoot), maxBuffer: 16 * 1024 * 1024});
+    const visualSamples = [0.3, 1.5, 3.5, 8.5, 11, 14, 17].map((seconds) => ({
+      frame: Math.min(props.durationInFrames - 1, Math.round(seconds * props.fps)),
+      label: `QA · ${seconds.toFixed(1)}s`,
+    }));
+    const samples = usesVisual ? visualSamples : [
+      {frame: 0, label: "START"},
+      ...props.sentences.slice(1).map((sentence) => ({frame: sentence.startFrame + 1, label: `CUT · ${sentence.id}`})),
+      {frame: props.durationInFrames - 1, label: "END"},
+    ];
+    const contactProps = {mediaPath: path.basename(paths.partialOutputPath), samples, safeZone: usesVisual ? DOUYIN_SAFE_ZONE : null};
+    await execFileImpl(remotion, ["still", "src/index.ts", "MediaContactSheet", temporary, "--props", JSON.stringify(contactProps), "--public-dir", outDir, "--image-format", "jpeg", "--jpeg-quality", "90", "--overwrite=false"], {cwd: remotionCwd(input.workspaceRoot), maxBuffer: 16 * 1024 * 1024});
     if (!(await isJpeg(temporary))) throw new Error("Remotion produced an invalid final-cut contact sheet.");
     await rename(temporary, paths.finalCutContactPath);
   }
