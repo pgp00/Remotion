@@ -3,6 +3,7 @@ import type {ProductionProps} from "./production-contract.js";
 import {SubtitleLayer, type BrandTheme, type SubtitleCue} from "./components/subtitle-layer";
 import {OverlayLayer} from "./components/overlay-layer";
 import {ShotLayer} from "./components/shot-layer";
+import {SoundBed} from "./components/sound-bed";
 import {visualTheme} from "./components/visual-theme";
 import {validateProductionProps} from "./production-contract.js";
 import {captionCuesForSentence} from "./visual-timing.js";
@@ -17,6 +18,7 @@ const brand: BrandTheme = {
 
 export const ProductionVideo = (props: ProductionProps) => {
   const cues: SubtitleCue[] = props.sentences.flatMap(captionCuesForSentence);
+  const enhanced = props.sentences.some((sentence) => sentence.visual !== undefined);
 
   return (
     <AbsoluteFill style={{backgroundColor: visualTheme.background, overflow: "hidden"}}>
@@ -30,9 +32,10 @@ export const ProductionVideo = (props: ProductionProps) => {
             <ShotLayer sentence={sentence} fps={props.fps} />
           </Freeze>
           <OverlayLayer sentence={sentence} fps={props.fps} />
-          <Audio src={staticFile(sentence.wavPath)} trimAfter={sentence.voiceFrames} />
+          <Audio src={staticFile(sentence.wavPath)} trimAfter={sentence.voiceFrames} volume={enhanced ? 0.82 : 1} />
         </Sequence>
       ))}
+      {enhanced && <SoundBed sentences={props.sentences} durationInFrames={props.durationInFrames} />}
       <SubtitleLayer cues={cues} brand={brand} />
     </AbsoluteFill>
   );

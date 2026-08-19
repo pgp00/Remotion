@@ -10,7 +10,7 @@ import {promisify} from "node:util";
 import {buildProductionProps, validateProductionPlan} from "../packages/remotion-video/src/production-contract.js";
 import {assertDescendant, readJson, writeJsonAtomic} from "./lib/job.mjs";
 import {assertProxyProbeJson, isJpeg, proxyArgs} from "./lib/prepare-media.mjs";
-import {assertAudibleVolume, assertQcMetadata, renderArgs} from "./lib/render-qc.mjs";
+import {analyzeVolume, assertAudibleVolume, assertMixHeadroom, assertQcMetadata, assertSystemFont, renderArgs} from "./lib/render-qc.mjs";
 
 const execFile = promisify(execFileCallback);
 const URL_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/u;
@@ -190,6 +190,12 @@ export const runProduction = async (options, {execFileImpl = execFile} = {}) => 
   const usesVisual = input.plan.sentences.some((sentence) => sentence.visual !== undefined);
   let designAudio = null;
   if (usesVisual) {
+    const {stdout: fontInventory} = await execFileImpl(
+      "/usr/sbin/system_profiler",
+      ["SPFontsDataType", "-json"],
+      {maxBuffer: 64 * 1024 * 1024},
+    );
+    assertSystemFont(fontInventory, "PingFang SC");
     await directory(input.workspaceRoot, paths.designAudioDir);
     const sourceRoot = await readableDirectory(path.join(input.workspaceRoot, "assets/audio/s5max"), "design audio root");
     const sourceManifestPath = await regularFile(path.join(sourceRoot, "sources.json"), "design audio manifest");
@@ -271,7 +277,10 @@ export const runProduction = async (options, {execFileImpl = execFile} = {}) => 
   ], {maxBuffer: 8 * 1024 * 1024});
   const qc = assertQcMetadata(probeOutput, props);
   const volume = await execFileImpl("ffmpeg", ["-nostdin", "-hide_banner", "-i", paths.partialOutputPath, "-af", "volumedetect", "-f", "null", "-"], {maxBuffer: 16 * 1024 * 1024});
-  qc.maxVolumeDb = assertAudibleVolume(volume.stderr);
+  assertAudibleVolume(volume.stderr);
+  const analysis = analyzeVolume(volume.stderr);
+  if (usesVisual) assertMixHeadroom(analysis);
+  Object.assign(qc, analysis);
   await execFileImpl("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-i", paths.partialOutputPath, "-f", "null", "-"], {maxBuffer: 16 * 1024 * 1024});
 
   if (!(await isJpeg(paths.finalCutContactPath))) {

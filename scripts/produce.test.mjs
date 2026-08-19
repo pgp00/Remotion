@@ -57,7 +57,8 @@ const fakeCommands = (root, files, {maxVolume = "-12.0"} = {}) => {
   const calls = [];
   const execFileImpl = async (command, args) => {
     calls.push([command, args]);
-    if (command === "ffmpeg" && args.includes("volumedetect")) return {stdout: "", stderr: `max_volume: ${maxVolume} dB\n`};
+    if (command === "/usr/sbin/system_profiler") return {stdout: JSON.stringify({SPFontsDataType: [{enabled: "yes", typefaces: [{family: "PingFang SC", enabled: "yes", valid: "yes"}]}]}), stderr: ""};
+    if (command === "ffmpeg" && args.includes("volumedetect")) return {stdout: "", stderr: `mean_volume: -15.0 dB\nmax_volume: ${maxVolume} dB\n`};
     if (command === "ffmpeg" && args.at(-1)?.endsWith(".partial.mp4")) {
       await writeFile(args.at(-1), "proxy");
       return {stdout: "", stderr: ""};
@@ -184,6 +185,26 @@ test("visual jobs reject a design audio hash mismatch before rendering", async (
     {key: "impact", fileName: "impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
   ]}));
   await assert.rejects(runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}), /design audio hash/);
+});
+
+test("visual jobs fail before TTS when PingFang SC is unavailable", async () => {
+  const {root, files} = await makeWorkspace();
+  const planValue = JSON.parse(await readFile(files.plan, "utf8"));
+  planValue.sentences[0].visual = {role: "hook", label: "先看", sfx: "impact"};
+  await writeFile(files.plan, JSON.stringify(planValue));
+  const audioRoot = path.join(root, "assets/audio/s5max");
+  await mkdir(audioRoot, {recursive: true});
+  for (const [name, value] of [["bgm.mp3", "bgm"], ["impact.wav", "impact"]]) await writeFile(path.join(audioRoot, name), value);
+  await writeFile(path.join(audioRoot, "sources.json"), JSON.stringify({schemaVersion: 1, licenseCheckedAt: "2026-08-19", assets: [
+    {key: "bgm", fileName: "bgm.mp3", sha256: sha256("bgm"), sourceUrl: "https://example.test/bgm", license: "test"},
+    {key: "impact", fileName: "impact.wav", sha256: sha256("impact"), sourceUrl: "https://example.test/impact", license: "test"},
+  ]}));
+  const fake = fakeCommands(root, files);
+  const execFileImpl = async (command, args) => command === "/usr/sbin/system_profiler"
+    ? {stdout: JSON.stringify({SPFontsDataType: []}), stderr: ""}
+    : fake.execFileImpl(command, args);
+  await assert.rejects(runProduction({planPath: files.plan, modelDir: files.model, pythonPath: files.python, outDir: files.outDir, workspaceRoot: root}, {execFileImpl}), /PingFang SC/);
+  assert.equal(fake.calls.some(([command]) => command === files.python), false);
 });
 
 test("runProduction rejects catalog mismatch and never overwrites a final", async () => {
