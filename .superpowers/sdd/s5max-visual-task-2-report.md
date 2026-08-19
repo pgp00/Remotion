@@ -29,3 +29,4 @@ Notes:
 - Verification: `node --test scripts/visual-timing.test.mjs` — 7 passed; `npm run typecheck --workspace @auto-video/remotion-video` — passed.
 - Follow-up boundary fix: the crossing-emphasis regression now requires bounded cues `[`12345678`, `90ABCDEFGHIJ`]`; the splitter shifts the adjacent boundary before the protected emphasis instead of producing one oversized cue.
 - General boundary fix: added a memoized 7–12-codepoint partition search that forbids cuts inside protected emphasis, with the existing splitter retained as fallback when no valid partition exists. Verification: `node --test scripts/visual-timing.test.mjs` — 8 passed; typecheck passed.
+- Impossible-partition fallback fix: when no bounded partition exists, only the normal chunks crossed by emphasis are merged, preserving text, timing, and emphasis traceability without forcing out-of-range chunks into the bounded path. Verification: visual-timing — 9 passed; typecheck passed.

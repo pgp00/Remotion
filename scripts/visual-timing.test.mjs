@@ -56,6 +56,20 @@ test("enhanced captions partition longer text around protected emphasis", () => 
   assert.ok(cues.every(({text}) => Array.from(text).length >= 7 && Array.from(text).length <= 12));
 });
 
+test("enhanced captions preserve emphasis when bounded partitioning is impossible", () => {
+  const sentence = {
+    id: "impossible-boundary",
+    text: "1234567890ABC",
+    startFrame: 0,
+    voiceFrames: 13,
+    visual: {role: "feature", emphasis: "BC"},
+  };
+  const cues = captionCuesForSentence(sentence);
+  assert.equal(cues.map(({text}) => text).join(""), sentence.text);
+  assert.ok(cues.some(({emphasis}) => emphasis === "BC"));
+  assert.ok(cues.every((cue, index) => cue.endFrame > cue.startFrame && (index === 0 || cues[index - 1].endFrame === cue.startFrame)));
+});
+
 test("one-frame enhanced speech remains one valid cue", () => {
   const cues = captionCuesForSentence({id: "s1", text: "好", startFrame: 5, voiceFrames: 1, visual: {role: "hook"}});
   assert.equal(cues.length, 1);

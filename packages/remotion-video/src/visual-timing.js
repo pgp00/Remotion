@@ -66,6 +66,7 @@ export const splitCaptionText = (text, protectedText = null) => {
       };
       const partitioned = chars(protectedText).length <= MAX_CHARS ? partition(0) : null;
       if (partitioned !== null) chunks.splice(0, chunks.length, ...partitioned);
+      else chunks.splice(first, last - first + 1, chunks.slice(first, last + 1).join(""));
     }
   }
 
