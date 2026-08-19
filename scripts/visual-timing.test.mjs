@@ -33,8 +33,9 @@ test("enhanced captions keep emphasis crossing the twelve-character boundary in 
   };
   const cues = captionCuesForSentence(sentence);
   assert.equal(cues.map(({text}) => text).join(""), sentence.text);
+  assert.deepEqual(cues.map(({text}) => text), ["12345678", "90ABCDEFGHIJ"]);
   assert.equal(cues.at(-1).endFrame, 30);
-  assert.deepEqual(cues.filter(({emphasis}) => emphasis === "0ABC").map(({text}) => text), ["1234567890ABCDEFGHIJ"]);
+  assert.deepEqual(cues.filter(({emphasis}) => emphasis === "0ABC").map(({text}) => text), ["90ABCDEFGHIJ"]);
 });
 
 test("enhanced captions rebalance a short trailing chunk toward seven characters", () => {

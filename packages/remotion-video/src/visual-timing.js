@@ -43,7 +43,12 @@ export const splitCaptionText = (text, protectedText = null) => {
       offset = end;
     });
     if (first !== -1 && last !== -1 && first !== last) {
-      chunks.splice(first, last - first + 1, chunks.slice(first, last + 1).join(""));
+      const prefixLength = chunks.slice(0, first).reduce((sum, chunk) => sum + chars(chunk).length, 0);
+      const combined = chunks.slice(first, last + 1).join("");
+      const combinedChars = chars(combined);
+      const emphasisStart = protectedStart - prefixLength;
+      const boundary = Math.min(emphasisStart, Math.max(1, combinedChars.length - MAX_CHARS));
+      chunks.splice(first, last - first + 1, combinedChars.slice(0, boundary).join(""), combinedChars.slice(boundary).join(""));
     }
   }
 

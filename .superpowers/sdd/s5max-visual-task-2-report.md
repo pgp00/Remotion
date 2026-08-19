@@ -27,3 +27,4 @@ Notes:
 - `splitCaptionText` now protects an emphasis range while splitting, preserves full text and contiguous frame coverage, and safely rebalances a short trailing chunk toward seven characters when the boundary remains valid.
 - The one-frame enhanced cue path remains unchanged; impossible 7–12 sizing guarantees for 13-codepoint text and positive cues when `voiceFrames < chunks` are not forced.
 - Verification: `node --test scripts/visual-timing.test.mjs` — 7 passed; `npm run typecheck --workspace @auto-video/remotion-video` — passed.
+- Follow-up boundary fix: the crossing-emphasis regression now requires bounded cues `[`12345678`, `90ABCDEFGHIJ`]`; the splitter shifts the adjacent boundary before the protected emphasis instead of producing one oversized cue.
