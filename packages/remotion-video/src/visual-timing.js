@@ -43,12 +43,29 @@ export const splitCaptionText = (text, protectedText = null) => {
       offset = end;
     });
     if (first !== -1 && last !== -1 && first !== last) {
-      const prefixLength = chunks.slice(0, first).reduce((sum, chunk) => sum + chars(chunk).length, 0);
-      const combined = chunks.slice(first, last + 1).join("");
-      const combinedChars = chars(combined);
-      const emphasisStart = protectedStart - prefixLength;
-      const boundary = Math.min(emphasisStart, Math.max(1, combinedChars.length - MAX_CHARS));
-      chunks.splice(first, last - first + 1, combinedChars.slice(0, boundary).join(""), combinedChars.slice(boundary).join(""));
+      const allChars = chars(text);
+      /** @type {Map<number, string[] | null>} */
+      const memo = new Map();
+      /** @param {number} position @returns {string[] | null} */
+      const partition = (position) => {
+        if (position === allChars.length) return [];
+        const cached = memo.get(position);
+        if (cached !== undefined) return cached;
+        for (let length = MIN_CHARS; length <= MAX_CHARS; length += 1) {
+          const end = position + length;
+          if (end > allChars.length || (position < protectedEnd && end > protectedStart && end < protectedEnd)) continue;
+          const rest = partition(end);
+          if (rest !== null) {
+            const result = [allChars.slice(position, end).join(""), ...rest];
+            memo.set(position, result);
+            return result;
+          }
+        }
+        memo.set(position, null);
+        return null;
+      };
+      const partitioned = chars(protectedText).length <= MAX_CHARS ? partition(0) : null;
+      if (partitioned !== null) chunks.splice(0, chunks.length, ...partitioned);
     }
   }
 

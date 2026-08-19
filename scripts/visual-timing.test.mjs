@@ -42,6 +42,20 @@ test("enhanced captions rebalance a short trailing chunk toward seven characters
   assert.deepEqual(splitCaptionText("1234567890ABC"), ["123456", "7890ABC"]);
 });
 
+test("enhanced captions partition longer text around protected emphasis", () => {
+  const sentence = {
+    id: "long-boundary",
+    text: "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    startFrame: 0,
+    voiceFrames: 36,
+    visual: {role: "feature", emphasis: "ABCD"},
+  };
+  const cues = captionCuesForSentence(sentence);
+  assert.equal(cues.map(({text}) => text).join(""), sentence.text);
+  assert.ok(cues.some(({emphasis}) => emphasis === "ABCD"));
+  assert.ok(cues.every(({text}) => Array.from(text).length >= 7 && Array.from(text).length <= 12));
+});
+
 test("one-frame enhanced speech remains one valid cue", () => {
   const cues = captionCuesForSentence({id: "s1", text: "好", startFrame: 5, voiceFrames: 1, visual: {role: "hook"}});
   assert.equal(cues.length, 1);

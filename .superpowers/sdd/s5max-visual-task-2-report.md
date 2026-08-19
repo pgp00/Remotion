@@ -28,3 +28,4 @@ Notes:
 - The one-frame enhanced cue path remains unchanged; impossible 7–12 sizing guarantees for 13-codepoint text and positive cues when `voiceFrames < chunks` are not forced.
 - Verification: `node --test scripts/visual-timing.test.mjs` — 7 passed; `npm run typecheck --workspace @auto-video/remotion-video` — passed.
 - Follow-up boundary fix: the crossing-emphasis regression now requires bounded cues `[`12345678`, `90ABCDEFGHIJ`]`; the splitter shifts the adjacent boundary before the protected emphasis instead of producing one oversized cue.
+- General boundary fix: added a memoized 7–12-codepoint partition search that forbids cuts inside protected emphasis, with the existing splitter retained as fallback when no valid partition exists. Verification: `node --test scripts/visual-timing.test.mjs` — 8 passed; typecheck passed.
