@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "licenseCheckedAt": "2026-08-19",
+  "assets": [
+    {"key":"bgm","fileName":"bgm-deep-techno-ambience.mp3","sha256":"b873f8373c4d1cf134f358105ff5914e601d60dd518a7a5c0ad04398f47c0fad","title":"Deep Techno Ambience","author":"Alejandro Magaña (A. M.)","sourceUrl":"https://assets.mixkit.co/music/134/134.mp3","sourcePage":"https://mixkit.co/free-stock-music/tag/technology/","license":"Mixkit Stock Music Free License","licenseUrl":"https://mixkit.co/license/#musicFree"},
+    {"key":"impact","fileName":"hook-impact.wav","sha256":"02b8cd40b3761288d54f4d6706983a2f8c110182b669ae2cdf9aab02935a4e7a","title":"Cinematic whoosh fast transition","sourceUrl":"https://assets.mixkit.co/active_storage/sfx/1492/1492.wav","sourcePage":"https://mixkit.co/free-sound-effects/transition/","license":"Mixkit Sound Effects Free License","licenseUrl":"https://mixkit.co/license/#sfxFree"},
+    {"key":"motor","fileName":"electric-razor.wav","sha256":"2b5d5afdc7a51a17e859aa927d32d746c26ceaa2d719134191385479efa537da","title":"Electric Razor SFX","author":"Vinrax","sourceUrl":"https://opengameart.org/sites/default/files/electric_razor.wav","sourcePage":"https://opengameart.org/content/electric-razor-sfx","license":"CC-BY 3.0","licenseUrl":"https://creativecommons.org/licenses/by/3.0/","attribution":"Electric Razor SFX by Vinrax, CC-BY 3.0"},
+    {"key":"water","fileName":"water-splash.wav","sha256":"a1ab335e5c632001c347574bfdd521c049755481067df44e7406476ec64df26e","title":"Water splash","sourceUrl":"https://assets.mixkit.co/active_storage/sfx/1311/1311.wav","sourcePage":"https://mixkit.co/free-sound-effects/water/","license":"Mixkit Sound Effects Free License","licenseUrl":"https://mixkit.co/license/#sfxFree"},
+    {"key":"usb","fileName":"interface-click.wav","sha256":"bb9d4bb078ba650cd81027dfca724162cf1df0352fc56018cb6241aab5a406cc","title":"Interface device click","sourceUrl":"https://assets.mixkit.co/active_storage/sfx/2577/2577.wav","sourcePage":"https://mixkit.co/free-sound-effects/technology/","license":"Mixkit Sound Effects Free License","licenseUrl":"https://mixkit.co/license/#sfxFree"},
+    {"key":"cta","fileName":"cta-click.wav","sha256":"248312c2ef619427ef7024126a846e4210fe37e39038cfd32c73b1fb854a8086","title":"Cool interface click tone","sourceUrl":"https://assets.mixkit.co/active_storage/sfx/2568/2568.wav","sourcePage":"https://mixkit.co/free-sound-effects/click/","license":"Mixkit Sound Effects Free License","licenseUrl":"https://mixkit.co/license/#sfxFree"}
+  ]
+}
