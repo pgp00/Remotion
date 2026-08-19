@@ -5,7 +5,8 @@ import {visualTheme} from "./visual-theme";
 
 type Sentence = ProductionProps["sentences"][number];
 const base = {position: "absolute" as const, fontFamily: visualTheme.fontFamily, color: visualTheme.text, textShadow: "0 4px 18px rgba(0,0,0,0.72)"};
-const proofMarkerMargin = 68;
+const proofMarkerHorizontalMargin = 68;
+const proofMarkerVerticalMargin = 71;
 
 export const OverlayLayer = ({sentence, fps}: {sentence: Sentence; fps: number}) => {
   const frame = useCurrentFrame();
@@ -22,8 +23,8 @@ export const OverlayLayer = ({sentence, fps}: {sentence: Sentence; fps: number})
 
   if (sentence.visual.role === "hook") return <div style={{...base, ...motion, left: 72, right: 200, top: 180, fontSize: 96, fontWeight: 900, lineHeight: 1.05, whiteSpace: "pre-wrap"}}>{label}</div>;
   if (sentence.visual.role === "proof") {
-    const markerX = Math.min(1080 - DOUYIN_SAFE_ZONE.right - proofMarkerMargin, Math.max(DOUYIN_SAFE_ZONE.left + proofMarkerMargin, sentence.shot.focusX * 1080));
-    const markerY = Math.min(1920 - DOUYIN_SAFE_ZONE.bottom - proofMarkerMargin, Math.max(DOUYIN_SAFE_ZONE.top + proofMarkerMargin, sentence.shot.focusY * 1920));
+    const markerX = Math.min(1080 - DOUYIN_SAFE_ZONE.right - proofMarkerHorizontalMargin, Math.max(DOUYIN_SAFE_ZONE.left + proofMarkerHorizontalMargin, sentence.shot.focusX * 1080));
+    const markerY = Math.min(1920 - DOUYIN_SAFE_ZONE.bottom - proofMarkerVerticalMargin, Math.max(DOUYIN_SAFE_ZONE.top + proofMarkerVerticalMargin, sentence.shot.focusY * 1920));
     const labelTop = Math.min(1220, Math.max(DOUYIN_SAFE_ZONE.top, markerY + 72));
     return <div style={{...motion, position: "absolute", inset: 0}}>
       <div style={{...base, left: markerX - 62, top: markerY - 62, width: 116, height: 116, borderRadius: "50%", border: `4px solid ${visualTheme.result}`, boxShadow: "0 0 0 6px rgba(0,0,0,0.28)"}} />

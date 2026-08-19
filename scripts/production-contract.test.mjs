@@ -201,9 +201,10 @@ test("visual overlays keep proof and feature labels inside the Douyin safe zone"
   assert.match(source, /import \{DOUYIN_SAFE_ZONE\} from "\.\.\/visual-timing\.js"/);
   assert.match(source, /left: DOUYIN_SAFE_ZONE\.left, right: DOUYIN_SAFE_ZONE\.right/);
   assert.match(source, /maxWidth: 808, whiteSpace: "normal", overflowWrap: "anywhere"/);
-  assert.match(source, /const proofMarkerMargin = 68;/);
-  assert.match(source, /DOUYIN_SAFE_ZONE\.left \+ proofMarkerMargin/);
-  assert.match(source, /1920 - DOUYIN_SAFE_ZONE\.bottom - proofMarkerMargin/);
+  assert.match(source, /const proofMarkerHorizontalMargin = 68;/);
+  assert.match(source, /const proofMarkerVerticalMargin = 71;/);
+  assert.match(source, /DOUYIN_SAFE_ZONE\.left \+ proofMarkerHorizontalMargin/);
+  assert.match(source, /1920 - DOUYIN_SAFE_ZONE\.bottom - proofMarkerVerticalMargin/);
 });
 
 test("production props type is owned by the shared contract", async () => {
