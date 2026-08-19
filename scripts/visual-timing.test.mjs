@@ -23,6 +23,24 @@ test("enhanced captions preserve text and exactly cover voice frames", () => {
   assert.equal(cues.filter(({emphasis}) => emphasis === "Type-C").length, 1);
 });
 
+test("enhanced captions keep emphasis crossing the twelve-character boundary in one cue", () => {
+  const sentence = {
+    id: "boundary",
+    text: "1234567890ABCDEFGHIJ",
+    startFrame: 10,
+    voiceFrames: 20,
+    visual: {role: "feature", emphasis: "0ABC"},
+  };
+  const cues = captionCuesForSentence(sentence);
+  assert.equal(cues.map(({text}) => text).join(""), sentence.text);
+  assert.equal(cues.at(-1).endFrame, 30);
+  assert.deepEqual(cues.filter(({emphasis}) => emphasis === "0ABC").map(({text}) => text), ["1234567890ABCDEFGHIJ"]);
+});
+
+test("enhanced captions rebalance a short trailing chunk toward seven characters", () => {
+  assert.deepEqual(splitCaptionText("1234567890ABC"), ["123456", "7890ABC"]);
+});
+
 test("one-frame enhanced speech remains one valid cue", () => {
   const cues = captionCuesForSentence({id: "s1", text: "好", startFrame: 5, voiceFrames: 1, visual: {role: "hook"}});
   assert.equal(cues.length, 1);

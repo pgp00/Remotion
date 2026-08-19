@@ -10,8 +10,8 @@ const weight = (value) => Math.max(1, chars(value).filter((character) => !/\s/u.
 /** @param {number} value @param {number} minimum @param {number} maximum */
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
-/** @param {string} text */
-export const splitCaptionText = (text) => {
+/** @param {string} text @param {string | null} [protectedText] */
+export const splitCaptionText = (text, protectedText = null) => {
   if (typeof text !== "string" || text.length === 0) throw new TypeError("caption text must be non-empty");
   if (chars(text).length <= MAX_CHARS) return [text];
   const chunks = [];
@@ -29,6 +29,44 @@ export const splitCaptionText = (text) => {
     if (previous && chars(previous + current).length <= MAX_CHARS) chunks[chunks.length - 1] += current;
     else chunks.push(current);
   }
+
+  if (protectedText && text.includes(protectedText)) {
+    const protectedStart = chars(text.slice(0, text.indexOf(protectedText))).length;
+    const protectedEnd = protectedStart + chars(protectedText).length;
+    let offset = 0;
+    let first = -1;
+    let last = -1;
+    chunks.forEach((chunk, index) => {
+      const end = offset + chars(chunk).length;
+      if (protectedStart < end && first === -1) first = index;
+      if (protectedEnd <= end && last === -1) last = index;
+      offset = end;
+    });
+    if (first !== -1 && last !== -1 && first !== last) {
+      chunks.splice(first, last - first + 1, chunks.slice(first, last + 1).join(""));
+    }
+  }
+
+  const trailingCandidate = chunks.at(-1);
+  if (chunks.length > 1 && trailingCandidate !== undefined && chars(trailingCandidate).length < MIN_CHARS) {
+    const penultimate = chunks.at(-2);
+    const trailing = trailingCandidate;
+    if (penultimate === undefined || trailing === undefined) return chunks;
+    const move = Math.min(chars(penultimate).length - 1, MIN_CHARS - chars(trailing).length);
+    if (move > 0) {
+      const protectedStart = protectedText !== null && text.includes(protectedText)
+        ? chars(text.slice(0, text.indexOf(protectedText))).length
+        : -1;
+      const protectedEnd = protectedStart !== -1 && protectedText !== null
+        ? protectedStart + chars(protectedText).length
+        : -1;
+      const penultimateEnd = chunks.slice(0, -1).reduce((sum, chunk) => sum + chars(chunk).length, 0);
+      if (protectedEnd === -1 || protectedEnd <= penultimateEnd - move || protectedStart >= penultimateEnd) {
+        const penultimateChars = chars(penultimate);
+        chunks.splice(-2, 2, penultimateChars.slice(0, -move).join(""), penultimateChars.slice(-move).join("") + trailing);
+      }
+    }
+  }
   return chunks;
 };
 
@@ -40,7 +78,7 @@ export const captionCuesForSentence = (sentence) => {
     return [{id: `${sentence.id}-caption-1`, text: sentence.text, startFrame: sentence.startFrame, endFrame: finalFrame, legacy: true, role: null, emphasis: null}];
   }
   const captionEmphasis = visual.emphasis && sentence.text.includes(visual.emphasis) ? visual.emphasis : null;
-  const chunks = splitCaptionText(sentence.text);
+  const chunks = splitCaptionText(sentence.text, captionEmphasis);
   while (chunks.length > sentence.voiceFrames) {
     const penultimate = chunks.at(-2);
     const last = chunks.at(-1);
