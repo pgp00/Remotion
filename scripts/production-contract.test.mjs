@@ -191,7 +191,7 @@ test("production composition uses the required sentence media clock", async () =
   assert.match(source, /<Freeze[\s\S]*frame=\{sentence\.voiceFrames - 1\}[\s\S]*active=\{\(frame\) => frame >= sentence\.voiceFrames\}/);
   assert.match(source, /<OffthreadVideo[\s\S]*muted/);
   assert.match(source, /<Audio[\s\S]*src=\{staticFile\(sentence\.wavPath\)\}[\s\S]*trimAfter=\{sentence\.voiceFrames\}/);
-  assert.match(source, /endFrame: sentence\.startFrame \+ sentence\.voiceFrames/);
+  assert.match(source, /flatMap\(captionCuesForSentence\)/);
 });
 
 test("production props type is owned by the shared contract", async () => {
