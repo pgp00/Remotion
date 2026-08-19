@@ -5,15 +5,16 @@
   "type": "module",
   "scripts": {
     "studio": "remotion studio src/index.ts",
-    "render:demo": "remotion render src/index.ts ProductMarketingDemo ../../out/demo-product.mp4",
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
-    "@auto-video/core": "*",
-    "@auto-video/shared": "*",
-    "@remotion/cli": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "remotion": "latest"
+    "@remotion/cli": "4.0.496",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.496"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3"
   }
 }

@@ -107,6 +107,30 @@ test("runScan renders media in bounded parallel shards", async (t) => {
   assert.deepEqual(rendered.sort(), assets.map(({id}) => id).sort());
 });
 
+test("runScan batches growing checkpoint snapshots", async (t) => {
+  const {sourceRoot, workDir} = await fixture(t);
+  const assets = Array.from({length: 60}, (_, index) => record(`asset-${index}`));
+  let checkpointWrites = 0;
+  const writeJsonImpl = async (filePath, value) => {
+    if (filePath.endsWith("checkpoint.json")) checkpointWrites += 1;
+    await writeFile(filePath, `${JSON.stringify(value)}\n`);
+  };
+  await runScan({
+    sourceRoot,
+    workDir,
+    scanImpl: async ({onCheckpoint}) => {
+      for (let index = 1; index <= assets.length; index += 1) {
+        await onCheckpoint({schemaVersion: 1, sourceRoot, assets: assets.slice(0, index)});
+      }
+      return scanResult(sourceRoot, assets);
+    },
+    renderSheetsImpl: async ({record: asset}) => ({contactSheetPath: `contacts/${asset.id}.jpg`, ctaSheetPath: `cta/${asset.id}.jpg`, qualityFlags: []}),
+    snapshotImpl: async () => ({count: 1, bytes: 7, maxMtimeMs: 1}),
+    writeJsonImpl,
+  });
+  assert.equal(checkpointWrites, 6);
+});
+
 test("runScan retains the prior catalog when scanning or final source verification fails", async (t) => {
   const {sourceRoot, workDir} = await fixture(t);
   await mkdir(workDir, {recursive: true});

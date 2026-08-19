@@ -33,9 +33,13 @@ test("renderSourceSheet extracts SMB source frames to local staging and publishe
   const calls = [];
   const execFileImpl = async (command, args) => {
     calls.push({command, args});
-    const output = command === "ffmpeg" ? args.at(-1) : args[3];
-    await mkdir(path.dirname(output), {recursive: true});
-    await writeFile(output, jpeg);
+    const outputs = command === "ffmpeg" && !args.includes("-filter_complex")
+      ? args.filter((value) => String(value).startsWith(stagingDir) && String(value).endsWith(".jpg"))
+      : [command === "ffmpeg" ? args.at(-1) : args[3]];
+    for (const output of outputs.length > 0 ? outputs : [args.at(-1)]) {
+      await mkdir(path.dirname(output), {recursive: true});
+      await writeFile(output, jpeg);
+    }
     return {stdout: "", stderr: ""};
   };
 
@@ -51,8 +55,8 @@ test("renderSourceSheet extracts SMB source frames to local staging and publishe
   assert.equal(await isJpeg(outputPath), true);
   assert.ok(calls.every(({command}) => command === "ffmpeg"));
   const sourceCalls = calls.filter(({args}) => args.includes(sourcePath));
-  assert.equal(sourceCalls.length, 3);
-  assert.ok(sourceCalls.every(({args}) => args[args.indexOf("-i") + 1] === sourcePath));
+  assert.equal(sourceCalls.length, 1);
+  assert.equal(sourceCalls[0].args.filter((value) => value === sourcePath).length, 3);
   assert.ok(calls.flatMap(({args}) => args).every((value) => !String(value).includes("proxies/")));
   assert.ok(calls.slice(0, -1).every(({args}) => args.at(-1).startsWith(stagingDir)));
   assert.deepEqual(await readdir(stagingDir), []);
@@ -159,8 +163,13 @@ test("renderAssetSheets returns local relative paths and injectable visual flags
     paths,
     execFileImpl: async (command, args) => {
       calls.push({command, args});
-      await mkdir(path.dirname(args.at(-1)), {recursive: true});
-      await writeFile(args.at(-1), jpeg);
+      const outputs = command === "ffmpeg" && !args.includes("-filter_complex")
+        ? args.filter((value) => String(value).endsWith(".jpg"))
+        : [args.at(-1)];
+      for (const output of outputs) {
+        await mkdir(path.dirname(output), {recursive: true});
+        await writeFile(output, jpeg);
+      }
       return {stdout: "", stderr: ""};
     },
     grayscaleStatsImpl: async ({samples}) => samples.map(() => ({meanLuma: 100, frameDifference: 0})),
@@ -181,8 +190,13 @@ test("renderAssetSheets only remeasures the missing derivative stage", async () 
     record: {id: "asset-2", sourcePath: "/Volumes/fake-smb/source.mp4", relativePath: "source.mp4", durationInSeconds: 10, qualityFlags: ["mostly_black"]},
     paths,
     execFileImpl: async (_command, args) => {
-      await mkdir(path.dirname(args.at(-1)), {recursive: true});
-      await writeFile(args.at(-1), jpeg);
+      const outputs = args.includes("-filter_complex")
+        ? [args.at(-1)]
+        : args.filter((value) => String(value).endsWith(".jpg"));
+      for (const output of outputs) {
+        await mkdir(path.dirname(output), {recursive: true});
+        await writeFile(output, jpeg);
+      }
       return {stdout: "", stderr: ""};
     },
     grayscaleStatsImpl: async ({samples}) => {

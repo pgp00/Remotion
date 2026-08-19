@@ -69,11 +69,13 @@ export const isJpeg = async (filePath) => {
 const thumbnailFilter = "scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black";
 const execOptions = {maxBuffer: 16 * 1024 * 1024};
 
-const sheetArgs = ({sourcePath, seconds, outputPath}) => [
+const frameBatchArgs = ({sourcePath, samples, outputPaths}) => [
   "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-  "-ss", seconds.toFixed(3), "-i", sourcePath,
-  "-map", "0:v:0", "-frames:v", "1", "-vf", thumbnailFilter,
-  "-q:v", "3", outputPath,
+  ...samples.flatMap(({seconds}) => ["-ss", seconds.toFixed(3), "-i", sourcePath]),
+  ...outputPaths.flatMap((outputPath, index) => [
+    "-map", `${index}:v:0`, "-frames:v", "1", "-vf", thumbnailFilter,
+    "-q:v", "3", outputPath,
+  ]),
 ];
 
 const gridLayout = (count) => Array.from({length: count}, (_, index) => `${(index % 4) * 480}_${Math.floor(index / 4) * 270}`).join("|");
@@ -120,10 +122,8 @@ export const renderSourceSheet = async ({sourcePath, relativePath, samples, outp
   await mkdir(batchDir);
   const framePaths = samples.map((_, index) => path.join(batchDir, `${String(index).padStart(2, "0")}.jpg`));
   try {
-    for (let index = 0; index < samples.length; index += 1) {
-      await execFileImpl("ffmpeg", sheetArgs({sourcePath, seconds: samples[index].seconds, outputPath: framePaths[index]}), execOptions);
-      if (!(await isJpeg(framePaths[index]))) throw new Error(`ffmpeg produced an invalid frame for ${relativePath}.`);
-    }
+    await execFileImpl("ffmpeg", frameBatchArgs({sourcePath, samples, outputPaths: framePaths}), execOptions);
+    if (!(await Promise.all(framePaths.map(isJpeg))).every(Boolean)) throw new Error(`ffmpeg produced an invalid frame for ${relativePath}.`);
     const extension = path.extname(outputPath) || ".jpg";
     const partial = path.join(path.dirname(outputPath), `${path.basename(outputPath, extension)}.${randomUUID()}.partial${extension}`);
     const labels = samples.map(({timecode}) => `${relativePath} | ${timecode}`);

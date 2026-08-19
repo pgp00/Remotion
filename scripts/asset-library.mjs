@@ -138,6 +138,7 @@ export const runScan = async ({
   scanImpl = scanAssetLibrary,
   renderSheetsImpl = renderAssetSheets,
   snapshotImpl = sourceSnapshot,
+  writeJsonImpl = writeJsonAtomic,
   now = () => new Date(),
 } = {}) => {
   if (!sourceRoot || !path.isAbsolute(sourceRoot)) throw new Error("sourceRoot must be an absolute path.");
@@ -155,15 +156,27 @@ export const runScan = async ({
   if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error("resume must be a safe run ID.");
   const runPath = path.join(paths.runsDir, `${runId}.json`);
   const existingRun = await readJsonIfPresent(runPath, {});
-  const writeRun = async (status, detail = {}) => writeJsonAtomic(runPath, {
+  const writeRun = async (status, detail = {}) => writeJsonImpl(runPath, {
     ...existingRun, ...detail, schemaVersion: 1, runId, sourceRoot, status, updatedAt: now().toISOString(),
   });
+  let checkpointState = null;
+  let checkpointChanges = 0;
+  let checkpointWrites = Promise.resolve();
+  const persistCheckpoint = (force = false) => {
+    if (!checkpointState) return checkpointWrites;
+    checkpointChanges += 1;
+    if (!force && checkpointChanges < 25) return checkpointWrites;
+    checkpointChanges = 0;
+    const snapshot = structuredClone(checkpointState);
+    checkpointWrites = checkpointWrites.then(() => writeJsonImpl(paths.checkpointPath, snapshot));
+    return checkpointWrites;
+  };
   try {
     await writeRun("running", {startedAt: existingRun.startedAt ?? now().toISOString(), error: null});
     const previousCatalog = await readJsonIfPresent(paths.catalogPath);
     const previousManifest = await readJsonIfPresent(paths.manifestPath, {});
     const checkpoint = await readJsonIfPresent(paths.checkpointPath);
-    let checkpointState = checkpoint;
+    checkpointState = checkpoint;
     const result = await scanImpl({
       sourceRoot,
       workDir: paths.workDir,
@@ -171,13 +184,13 @@ export const runScan = async ({
       checkpoint,
       onCheckpoint: async (value) => {
         checkpointState = value;
-        await writeJsonAtomic(paths.checkpointPath, value);
+        await persistCheckpoint();
       },
     });
     const catalog = result.catalog;
     checkpointState = result.checkpoint ?? checkpointState;
     if (!Array.isArray(catalog.assets) || catalog.assets.length === 0) throw new Error("No supported video records were produced; refusing to publish an empty catalog.");
-    await writeJsonAtomic(paths.checkpointPath, checkpointState);
+    await persistCheckpoint(true);
     await writeRun("rendering_sheets", {metrics: result.metrics, missing: result.missing, warnings: result.warnings, error: null});
     const renderable = catalog.assets.filter((asset) => asset.state !== "failed" && Number.isFinite(asset.durationInSeconds) && asset.durationInSeconds > 0);
     const workers = Math.min(mediaConcurrency, Math.max(1, renderable.length));
@@ -195,15 +208,15 @@ export const runScan = async ({
       }
       const checkpointAsset = checkpointState?.assets?.find((item) => item.id === asset.id);
       if (checkpointAsset) Object.assign(checkpointAsset, asset);
-      await writeJsonAtomic(paths.checkpointPath, checkpointState);
-      await writeRun("rendering_sheets", {metrics: result.metrics, error: null});
+      await persistCheckpoint();
     };
     await Promise.all(Array.from({length: workers}, async (_, worker) => {
       for (let index = worker; index < renderable.length; index += workers) await renderOne(renderable[index]);
     }));
+    await persistCheckpoint(true);
     const finalSnapshot = await snapshotImpl(sourceRoot);
     if (!sameSnapshot(result.sourceSnapshots?.after, finalSnapshot)) throw new Error("Source contents changed or became unreadable before catalog publish.");
-    await writeJsonAtomic(paths.catalogPath, catalog);
+    await writeJsonImpl(paths.catalogPath, catalog);
     const missingPaths = new Set((result.missing ?? []).map((asset) => asset.relativePath));
     const missingCounts = {...(previousManifest.missingCounts ?? {})};
     for (const relativePath of Object.keys(missingCounts)) {
@@ -214,7 +227,7 @@ export const runScan = async ({
       .filter(([, scans]) => scans >= 2)
       .map(([relativePath, scans]) => ({relativePath, missingScans: scans}));
     const manifest = {schemaVersion: 1, sourceRoot, runId, completedAt: now().toISOString(), sourceSnapshot: finalSnapshot, metrics: {...result.metrics, complete: catalog.assets.filter((asset) => asset.state === "complete").length, failed: catalog.assets.filter((asset) => asset.state === "failed").length}, missing: result.missing ?? [], missingCounts, missingCleanupCandidates, warnings: result.warnings ?? []};
-    await writeJsonAtomic(paths.manifestPath, manifest);
+    await writeJsonImpl(paths.manifestPath, manifest);
     await writeRun("complete", {
       metrics: manifest.metrics,
       missing: manifest.missing,
@@ -226,6 +239,7 @@ export const runScan = async ({
     });
     return {runId, catalog, manifest};
   } catch (error) {
+    await persistCheckpoint(true);
     await writeRun("failed", {error: error?.message ?? String(error)});
     throw error;
   }
